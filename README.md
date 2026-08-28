@@ -62,6 +62,16 @@ Python SDK (laptop) ←USB CDC→ RP2350 ←SCL/SDA, SPI, PWM, GPIO→ your unmo
 
 A Raspberry Pi Pico 2 (RP2350A, ~€5), pull-up resistors, and jumper wires. No custom board required.
 
+## Documentation
+
+| | |
+|---|---|
+| [Setting up a development machine](docs/setup.md) | Windows and Linux, with or without hardware |
+| [RP2350 / Pico 2 architecture](docs/rp2350.md) | The chip, and the PIO constraints that shape the design |
+| [The toolchain explained](docs/toolchain.md) | What each tool does and why it's in the chain |
+
+You don't need a Pico to contribute. Most of the code — the host SDK, the wire protocol, manifests, even PIO programs and their instruction budgets — is testable without one.
+
 ## Licence
 
 Apache 2.0 — see [LICENSE](LICENSE).
