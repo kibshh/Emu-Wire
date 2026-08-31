@@ -81,6 +81,7 @@ Write-Host '==> environment' -ForegroundColor Cyan
 $path = [Environment]::GetEnvironmentVariable('Path', 'User')
 foreach ($d in @(
     (Join-Path $gccDir 'bin'),
+    (Join-Path $ROOT "tools\$SDK_VER\pioasm"),
     (Join-Path $ROOT "picotool\$SDK_VER\picotool"),
     (Join-Path $ROOT "openocd\$OPENOCD_VER")
 )) {

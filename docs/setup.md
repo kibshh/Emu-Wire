@@ -89,9 +89,15 @@ Add to your user `Path`:
 
 ```
 %USERPROFILE%\.pico-sdk\toolchain\14.2.rel1\bin
+%USERPROFILE%\.pico-sdk\tools\2.3.0\pioasm
 %USERPROFILE%\.pico-sdk\picotool\2.3.0\picotool
 %USERPROFILE%\.pico-sdk\openocd\0.12.0+dev
 ```
+
+> The OpenOCD entry has **no `bin\` subdirectory** — that build unpacks its
+> binary and `scripts/` folder side by side. OpenOCD locates its `.cfg` files
+> relative to its own executable, so `-f target/rp2350.cfg` resolves from any
+> working directory once it's on `PATH`.
 
 Open a **new** terminal afterwards.
 
@@ -181,7 +187,7 @@ Append to `~/.bashrc`:
 ```bash
 export PICO_SDK_PATH="$HOME/.pico-sdk/sdk"
 export PICO_TOOLCHAIN_PATH="$HOME/.pico-sdk/toolchain/14.2.rel1"
-export PATH="$PATH:$PICO_TOOLCHAIN_PATH/bin:$HOME/.pico-sdk/picotool/2.3.0/picotool:$HOME/.pico-sdk/openocd/0.12.0+dev/bin"
+export PATH="$PATH:$PICO_TOOLCHAIN_PATH/bin:$HOME/.pico-sdk/tools/2.3.0/pioasm:$HOME/.pico-sdk/picotool/2.3.0/picotool:$HOME/.pico-sdk/openocd/0.12.0+dev"
 ```
 
 ---

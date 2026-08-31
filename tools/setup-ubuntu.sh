@@ -105,7 +105,7 @@ cat >> "$PROFILE" <<EOF
 $MARK
 export PICO_SDK_PATH="$ROOT/sdk"
 export PICO_TOOLCHAIN_PATH="$GCC_DIR"
-export PATH="\$PATH:$GCC_DIR/bin:$ROOT/picotool/$SDK_VER/picotool:$ROOT/openocd/$OPENOCD_VER/bin"
+export PATH="$PATH:$GCC_DIR/bin:$ROOT/tools/$SDK_VER/pioasm:$ROOT/picotool/$SDK_VER/picotool:$ROOT/openocd/$OPENOCD_VER"
 EOF
 fi
 
