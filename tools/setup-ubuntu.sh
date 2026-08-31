@@ -76,10 +76,26 @@ fi
 
 # --- 5. pico-sdk ------------------------------------------------------------
 say "pico-sdk $SDK_VER"
+# Clone the release TAG, not master. Pinning the toolchain while tracking a
+# moving branch would make "$SDK_VER" a claim rather than a fact — and the
+# prebuilt pioasm and picotool fetched below are versioned WITH the SDK, so
+# pairing them against a drifted master is how you get a mismatch that only
+# surfaces at link time.
 if [ ! -d "$ROOT/sdk" ]; then
-    git clone -b master --depth 1 https://github.com/raspberrypi/pico-sdk.git "$ROOT/sdk"
+    git clone -b "$SDK_VER" --depth 1 https://github.com/raspberrypi/pico-sdk.git "$ROOT/sdk"
 fi
 git -C "$ROOT/sdk" submodule update --init --depth 1 lib/tinyusb   # USB CDC transport
+
+# Assert, don't assume. This also catches an SDK left behind by an earlier
+# run of this script that cloned master.
+sdk_have=$(sed -n 's/.*set(PICO_SDK_VERSION_\(MAJOR\|MINOR\|REVISION\) \([0-9]*\)).*/\2/p' \
+           "$ROOT/sdk/pico_sdk_version.cmake" | paste -sd. -)
+if [ "$sdk_have" != "$SDK_VER" ]; then
+    echo "ERROR: $ROOT/sdk contains pico-sdk $sdk_have, but this script targets $SDK_VER." >&2
+    echo "       Delete that directory and re-run, or change SDK_VER at the top." >&2
+    exit 1
+fi
+echo "    pico-sdk $sdk_have verified"
 
 # --- 6. pioasm, picotool, OpenOCD ------------------------------------------
 # Ubuntu's packaged openocd has no rp2350.cfg. This build does.

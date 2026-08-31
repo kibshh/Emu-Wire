@@ -57,12 +57,18 @@ The Arm toolchain has no user-scope installer, so take the portable zip. Downloa
 ### 3. The SDK
 
 ```powershell
-git clone -b master --depth 1 https://github.com/raspberrypi/pico-sdk.git $env:USERPROFILE\.pico-sdk\sdk
+git clone -b 2.3.0 --depth 1 https://github.com/raspberrypi/pico-sdk.git $env:USERPROFILE\.pico-sdk\sdk
 cd $env:USERPROFILE\.pico-sdk\sdk
 git submodule update --init --depth 1 lib/tinyusb
 ```
 
 `tinyusb` is not optional — USB CDC is how the host SDK talks to the board.
+
+> **Clone the release tag, not `master`.** `master` moves, so a checkout made
+> today and one made next month are different SDKs wearing the same name. The
+> prebuilt `pioasm` and `picotool` below are versioned *with* the SDK, and
+> pairing them against a drifted `master` produces mismatches that surface at
+> link time rather than at clone time.
 
 ### 4. pioasm and picotool
 
@@ -167,7 +173,7 @@ tar -xf /tmp/armgcc.tar.xz -C ~/.pico-sdk/toolchain/14.2.rel1 --strip-components
 ### 5. SDK and tools
 
 ```bash
-git clone -b master --depth 1 https://github.com/raspberrypi/pico-sdk.git ~/.pico-sdk/sdk
+git clone -b 2.3.0 --depth 1 https://github.com/raspberrypi/pico-sdk.git ~/.pico-sdk/sdk
 git -C ~/.pico-sdk/sdk submodule update --init --depth 1 lib/tinyusb
 
 BASE=https://github.com/raspberrypi/pico-sdk-tools/releases/download/v2.3.0-1
@@ -201,7 +207,21 @@ arm-none-eabi-gcc --version    # 14.2.Rel1
 cmake --version                # >= 3.13
 ninja --version
 picotool version               # 2.3.0
+pioasm --version               # 2.3.0
 ```
+
+Confirm the SDK checkout is the version you think it is — the tree declares it,
+independently of how it was fetched:
+
+```console
+$ grep -E 'set\(PICO_SDK_VERSION_(MAJOR|MINOR|REVISION)' ~/.pico-sdk/sdk/pico_sdk_version.cmake
+    set(PICO_SDK_VERSION_MAJOR 2)
+    set(PICO_SDK_VERSION_MINOR 3)
+    set(PICO_SDK_VERSION_REVISION 0)
+```
+
+If that disagrees with the table above, you have an SDK from `master` or an
+older run. Delete `~/.pico-sdk/sdk` and re-clone at the tag.
 
 Then build something. Any project configures the same way — note the two `_DIR` flags, which point CMake at the prebuilt tools:
 

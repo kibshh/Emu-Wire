@@ -49,12 +49,27 @@ if (-not (Test-Path (Join-Path $gccDir 'bin\arm-none-eabi-gcc.exe'))) {
 # --- 3. pico-sdk ------------------------------------------------------------
 Write-Host '==> pico-sdk' -ForegroundColor Cyan
 $sdkDir = Join-Path $ROOT 'sdk'
+# Clone the release TAG, not master. Pinning the toolchain while tracking a
+# moving branch would make "$SDK_VER" a claim rather than a fact — and the
+# prebuilt pioasm and picotool fetched below are versioned WITH the SDK, so
+# pairing them against a drifted master is how you get a mismatch that only
+# surfaces at link time.
 if (-not (Test-Path $sdkDir)) {
-    git clone -b master --depth 1 https://github.com/raspberrypi/pico-sdk.git $sdkDir
+    git clone -b $SDK_VER --depth 1 https://github.com/raspberrypi/pico-sdk.git $sdkDir
 }
 Push-Location $sdkDir
 git submodule update --init --depth 1 lib/tinyusb   # needed for USB CDC transport
 Pop-Location
+
+# Assert, don't assume. This also catches an SDK left behind by an earlier run
+# of this script that cloned master.
+$sdkHave = (Select-String -Path (Join-Path $sdkDir 'pico_sdk_version.cmake') `
+    -Pattern 'set\(PICO_SDK_VERSION_(MAJOR|MINOR|REVISION) (\d+)\)' |
+    ForEach-Object { $_.Matches[0].Groups[2].Value }) -join '.'
+if ($sdkHave -ne $SDK_VER) {
+    throw "$sdkDir contains pico-sdk $sdkHave, but this script targets $SDK_VER. Delete that directory and re-run, or change `$SDK_VER at the top."
+}
+Write-Host "    pico-sdk $sdkHave verified"
 
 # --- 4. Prebuilt pioasm / picotool / OpenOCD --------------------------------
 # Building these from source needs a host C++ compiler, which this machine has
