@@ -1,0 +1,104 @@
+# EmuWire wire protocol — SINGLE SOURCE OF TRUTH
+#
+# This is the entry point. The spec is split across the files listed under
+# `includes` below; protocol/codegen.py loads this file, merges them in order,
+# validates the result, and emits:
+#
+#   firmware/src/protocol/messages.h   (structs, offsets, enums)
+#   sdk/emuwire/protocol.py            (pack/unpack)
+#
+# Never hand-edit a generated file. Change the wire format here, re-run
+# codegen, and commit the regenerated output in the same commit. CI fails on
+# drift.
+
+protocol:
+  name: emuwire
+  # Bumped on any incompatible change. Reported by INFO so the SDK can refuse
+  # to talk to firmware it does not understand rather than misparse it.
+  version: 1
+  endianness: little        # every multi-byte field, without exception
+
+# ---------------------------------------------------------------------------
+# Includes
+# ---------------------------------------------------------------------------
+# Merged in this order. Top-level keys (`enums`, `bitmasks`, `structs`,
+# `messages`) are unioned; a duplicate key in two files is an error, not a
+# silent override — the loader must reject it rather than pick a winner.
+#
+# Order matters only for readability of diagnostics; every file is loaded
+# before validation runs, so forward references between files are fine.
+includes:
+  - frame.yaml              # frame layout, CRC parameters
+  - constants.yaml          # named sentinel values
+  - status.yaml             # status codes and their message templates
+  - enums.yaml              # wire vocabulary, bus-independent
+  - bitmasks.yaml           # flag fields
+  - structs.yaml            # composite payload members
+  - buses/i2c.yaml          # I2C: pins, addressing, speeds, supported faults
+  - buses/spi.yaml          # SPI: pins, modes, word widths, supported faults
+  - messages/system.yaml    # PING, INFO, RESET
+  - messages/bus.yaml       # BUS_CREATE, BUS_DESTROY, BUS_LIST
+  - messages/device.yaml    # DEV_ATTACH, DEV_DETACH, DEV_WRITE_REGS, DEV_READ_REGS
+  - messages/fault.yaml     # FAULT_SET, FAULT_CLEAR, FAULT_LIST
+  - messages/trace.yaml     # TRACE_START, TRACE_STOP
+  - messages/events.yaml    # EVT_DEV_ACCESS, EVT_FAULT_FIRED, EVT_TRACE_DATA, EVT_ERROR
+
+# ---------------------------------------------------------------------------
+# Bus protocols
+# ---------------------------------------------------------------------------
+# Each protocol is defined in exactly one file under buses/. Codegen builds
+# the wire-level `bus_protocol` enum from their `id` fields — it is not
+# written by hand anywhere, so a protocol cannot exist in the enum while its
+# pin roles, address modes or supported faults are missing.
+#
+# Adding a protocol (1-Wire, SENT, LIN, …) is therefore one new file plus one
+# line in `includes` above.
+synthesised_enums:
+  bus_protocol:
+    type: u8
+    from: buses          # key becomes the enum name, `id` becomes its value
+
+# ---------------------------------------------------------------------------
+# Message type ID allocation
+# ---------------------------------------------------------------------------
+# Ranges are reserved per group so a new message never has to reuse a number.
+# IDs are permanent: never renumber one, only append within its range. The
+# same rule applies to enum values and bitmask bits.
+#
+#   0x01-0x0F  system      0x10-0x1F  bus       0x20-0x2F  device
+#   0x30-0x3F  fault       0x40-0x4F  trace     0x50-0x7F  reserved
+#   0x80-0xFF  asynchronous events
+#
+# Bit 7 of TYPE is the async marker, so a dispatcher can tell a command from
+# an event with one bit test and no lookup. The loader enforces that every
+# message in the `async` group has bit 7 set, and that no other message does.
+id_ranges:
+  system: [0x01, 0x0F]
+  bus:    [0x10, 0x1F]
+  device: [0x20, 0x2F]
+  fault:  [0x30, 0x3F]
+  trace:  [0x40, 0x4F]
+  async:  [0x80, 0xFF]
+
+# ---------------------------------------------------------------------------
+# Rules the loader must enforce
+# ---------------------------------------------------------------------------
+# These are invariants, not style. Each one exists because breaking it
+# produces a failure that is silent on the wire and expensive to find.
+validation:
+  - unique_message_ids            # two messages sharing an ID
+  - ids_within_group_range        # an ID outside its group's reserved range
+  - async_bit_matches_group       # bit 7 disagreeing with `group: async`
+  - references_resolve            # an enum/bitmask/struct name that does not exist
+  - count_field_exists            # a variable-length field whose count is not a sibling
+  - response_starts_with_status   # a command whose failure mode is unreadable
+  - async_has_no_request          # an event modelled as if it were a command
+  - repeated_structs_fixed_size   # variable-length records in a DMA ring buffer
+  - bus_pins_match_bus_create     # a pin role map that has drifted from the message
+  - bus_faults_exist              # a supported_faults entry that is not a fault_type
+  - bus_address_modes_exist       # an address_modes entry that is not an address_mode
+  - bus_declares_address_modes    # a bus with no way to identify a device
+  - address_modes_claimed_by_a_bus # an address_mode value no bus accepts
+  - bus_ids_unique                # two protocols claiming the same wire value
+  - bitmask_bits_unique_and_in_range
+  - no_duplicate_keys_across_files

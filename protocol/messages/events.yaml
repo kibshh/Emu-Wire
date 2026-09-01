@@ -1,0 +1,72 @@
+# Asynchronous events — TYPE bit 7 set, SEQ always 0
+#
+# Part of the EmuWire protocol spec. Entry point: protocol/protocol.yaml
+# Merged by protocol/codegen.py — see protocol.yaml for ID allocation rules.
+
+messages:
+
+  EVT_DEV_ACCESS:
+    id: 0x80
+    group: async
+    direction: device_to_host
+    description: >
+      The DUT accessed a register. Drives on_write callbacks and lets a test
+      assert ordering — "the driver configured oversampling before reading".
+      Only emitted for devices attached with REPORT_ACCESS set.
+    payload:
+      - {name: bus_id,       type: u8}
+      - {name: dev_id,       type: u8}
+      - {name: access,       type: u8,  enum: access_kind}
+      - {name: value,        type: u8}
+      - {name: reg,          type: u16}
+      - {name: _pad,         type: u16}
+      - {name: timestamp_us, type: u64}
+
+  EVT_FAULT_FIRED:
+    id: 0x81
+    group: async
+    direction: device_to_host
+    description: "A fault triggered. Lets a test assert the fault actually happened and correlate it with driver behaviour."
+    payload:
+      - {name: bus_id,       type: u8}
+      - {name: dev_id,       type: u8}
+      - {name: fault_id,     type: u8}
+      - {name: fault_type,   type: u8,  enum: fault_type}
+      - {name: remaining,    type: u16, description: "Firings left after this one. FAULT_REPEAT_UNLIMITED if the fault never auto-clears."}
+      - {name: _pad,         type: u16}
+      - {name: timestamp_us, type: u64}
+
+  EVT_TRACE_DATA:
+    id: 0x82
+    group: async
+    direction: device_to_host
+    description: >
+      A chunk of captured transactions. chunk_index increments per chunk so
+      the host can detect a lost chunk rather than silently assembling a
+      corrupt capture.
+    payload:
+      - {name: bus_id,      type: u8}
+      - {name: overflowed,  type: u8, description: "1 if edges were dropped before this chunk. Also marked in-stream by an OVERFLOW_GAP record."}
+      - {name: edge_count,  type: u16}
+      - {name: chunk_index, type: u32}
+      - {name: edges,       type: struct, struct: trace_edge, count_field: edge_count}
+
+  EVT_ERROR:
+    id: 0x83
+    group: async
+    direction: device_to_host
+    description: >
+      An asynchronous failure. This is the second and only other shape a
+      failure may take — a handler returns a status, or something async
+      raises this. Nothing fails silently: in a test instrument a wrong
+      answer the user trusts is worse than a crash.
+    payload:
+      - {name: code,         type: u8,  enum: status}
+      - {name: context_type, type: u8,  description: "Message type that caused it, or 0 if unsolicited."}
+      - {name: context_seq,  type: u8,  description: "SEQ of that message, or 0."}
+      - {name: bus_id,       type: u8,  description: "BUS_ID_NONE if the error is not specific to a bus."}
+      - {name: dev_id,       type: u8,  description: "DEV_ID_NONE if the error is not specific to a device."}
+      - {name: _pad,         type: u8}
+      - {name: _pad2,        type: u16}
+      - {name: detail,       type: u32, description: "Code-specific: the offending value, count, or measured frequency."}
+      - {name: timestamp_us, type: u64}

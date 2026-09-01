@@ -1,0 +1,98 @@
+# Enums — the wire vocabulary
+#
+# Part of the EmuWire protocol spec. Entry point: protocol/protocol.yaml
+#
+# These are the scalar values that appear in message fields, so they must be
+# globally unique and stable regardless of which bus uses them.
+#
+# Per-bus semantics live in protocol/buses/<name>.yaml — which pin carries
+# which signal, which address modes apply, which of the fault_type values
+# below are meaningful. The `bus_protocol` enum is synthesised from those
+# files; it is deliberately not defined here, so adding a protocol means
+# adding one file rather than editing a shared enum and hoping every related
+# table is updated with it.
+
+enums:
+  # How a device on a bus is identified. Every bus needs some device-identity
+  # mechanism, so this is shared vocabulary rather than an I2C detail — but
+  # each value belongs to specific buses, and buses/<protocol>.yaml declares
+  # which ones it accepts. A bus with no declared address_modes is a spec bug:
+  # DEV_ATTACH would have no honest value to send.
+  address_mode:
+    type: u8
+    values:
+      ADDR_7BIT:        {value: 0x00, description: "I2C. Address in the low 7 bits of DEV_ATTACH.address."}
+      ADDR_10BIT:       {value: 0x01, description: "I2C. Full 10-bit address in DEV_ATTACH.address."}
+      ADDR_CHIP_SELECT: {value: 0x02, description: "SPI. No address on the wire; DEV_ATTACH.address carries the chip-select index instead."}
+
+  # 0 means the device has no register pointer at all: every read clocks out
+  # the current sample MSB first, and array order IS stream order.
+  reg_addr_width:
+    type: u8
+    values:
+      STREAMING: {value: 0x00}
+      WIDTH_8:   {value: 0x01}
+      WIDTH_16:  {value: 0x02}
+
+  auto_increment:
+    type: u8
+    values:
+      NONE:     {value: 0x00}
+      ON_READ:  {value: 0x01}
+      ON_WRITE: {value: 0x02}
+      BOTH:     {value: 0x03}
+
+  access_kind:
+    type: u8
+    values:
+      READ:  {value: 0x00}
+      WRITE: {value: 0x01}
+
+  fault_type:
+    type: u8
+    values:
+      # Emulation-layer faults — implemented on core 1, not in PIO.
+      NACK_ON_READ:     {value: 0x01, params: "param_a = number of reads to NACK"}
+      NACK_ON_WRITE:    {value: 0x02, params: "param_a = number of writes to NACK"}
+      BUS_HANG:         {value: 0x03, params: "param_a = hold duration in us, 0 = indefinite"}
+      CORRUPT_REGISTER: {value: 0x04, params: "trigger_reg = register, param_a = XOR mask"}
+      OUT_OF_RANGE:     {value: 0x05, params: "trigger_reg = register, param_a = value to substitute"}
+      STUCK_VALUE:      {value: 0x06, params: "trigger_reg = register; freezes it against set()"}
+      CLOCK_STRETCH:    {value: 0x07, params: "param_a = stretch duration in us"}
+      # PIO-layer timing faults — branch targets inside i2c_slave.pio. These
+      # are the differentiator: no fixed-peripheral tool can produce them.
+      SETUP_VIOLATION:  {value: 0x40, params: "param_a = violation in ns"}
+      HOLD_VIOLATION:   {value: 0x41, params: "param_a = violation in ns"}
+      PARTIAL_BYTE:     {value: 0x42, params: "param_a = bit index to abort at, 0-7"}
+      ACK_GLITCH:       {value: 0x43, params: "param_a = glitch width in ns"}
+      CLOCK_SKEW:       {value: 0x44, params: "param_a = start us, param_b = ns added per transaction"}
+
+  fault_trigger:
+    type: u8
+    values:
+      IMMEDIATE:       {value: 0x00, params: "fires on the next matching access"}
+      AFTER_N_ACCESS:  {value: 0x01, params: "trigger_n = access count"}
+      ON_NTH_READ_REG: {value: 0x02, params: "trigger_reg = register, trigger_n = which read"}
+      AFTER_MS:        {value: 0x03, params: "trigger_n = milliseconds from arming"}
+      RANDOM:          {value: 0x04, params: "probability_pct = 1-100 per access"}
+
+  board_id:
+    type: u8
+    values:
+      UNKNOWN: {value: 0x00}
+      PICO2:   {value: 0x01}
+      PICO2W:  {value: 0x02}
+      CUSTOM:  {value: 0xFF}
+
+  mcu_id:
+    type: u8
+    values:
+      RP2350A: {value: 0x01}
+      RP2350B: {value: 0x02}
+
+  reset_mode:
+    type: u8
+    values:
+      SOFT:    {value: 0x00, description: "Tear down all buses and devices, keep running."}
+      BOOTSEL: {value: 0x01, description: "Reboot into the USB bootloader for reflashing."}
+

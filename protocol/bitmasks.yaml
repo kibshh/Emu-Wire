@@ -1,0 +1,60 @@
+# Bitmasks — flag fields
+#
+# Part of the EmuWire protocol spec. Entry point: protocol/protocol.yaml
+
+bitmasks:
+
+
+  # What this firmware build can actually do. Not all of these are protocols —
+  # TRACE is a capability, PWM and DIGITAL are output modes — so the mask is
+  # named for what it really is. The SDK reads it on connect and refuses
+  # unsupported requests locally, with a specific message, rather than sending
+  # a command the board will reject.
+  #
+  # Bits are allocated permanently: never renumber one, only append. A build
+  # that lacks a feature clears its bit; it does not shift the others.
+  capabilities:
+    type: u16
+    bits:
+      I2C:     {bit: 0}
+      SPI:     {bit: 1}
+      PWM:     {bit: 2}
+      DIGITAL: {bit: 3}
+      TRACE:   {bit: 4}
+
+  device_flags:
+    type: u8
+    bits:
+      # Pointer rolls to the first register at the end of the map. When clear
+      # it saturates on the last register instead.
+      WRAP:              {bit: 0}
+      # NACK writes to read-only registers. When clear they are accepted and
+      # discarded. Real parts differ, so the manifest records which.
+      NACK_ON_RO_WRITE:  {bit: 1}
+      # Emit EVT_DEV_ACCESS for every access by the DUT.
+      REPORT_ACCESS:     {bit: 2}
+
+  register_flags:
+    type: u8
+    bits:
+      WRITABLE:      {bit: 0, description: "The DUT may write this register."}
+      USER_SETTABLE: {bit: 1, description: "The host may set it at runtime via DEV_WRITE_REGS."}
+
+  trace_flags:
+    type: u8
+    bits:
+      # Stop capturing when the buffer fills, rather than overwriting oldest.
+      STOP_ON_FULL:  {bit: 0}
+
+  trace_edge_flags:
+    type: u8
+    bits:
+      # THE honesty marker. Firmware inserts a record with this bit set at the
+      # exact point edges were lost, so a gap is visible in the stream at the
+      # position it happened rather than only as a total at the end. `_pad`
+      # carries the number of edges dropped. A capture with an unreported gap
+      # is worse than no capture, because the user trusts it.
+      OVERFLOW_GAP: {bit: 0}
+      # The 32-bit tick counter wrapped before this edge.
+      WRAPPED:      {bit: 1}
+

@@ -1,0 +1,49 @@
+# Named sentinel values
+#
+# Part of the EmuWire protocol spec. Entry point: protocol/protocol.yaml
+#
+# Every reserved magic number lives here so codegen can emit a named constant
+# for C and Python. Nobody should ever type 0xFF and hope the reader knows
+# which of five meanings applies.
+#
+# Several share a value. That is deliberate, not redundancy — DEV_ID_ALL and
+# DEV_ID_NONE are both 0xFF but mean opposite things, and a reader seeing the
+# bare number cannot tell which is intended.
+
+constants:
+
+  # --- pins ---------------------------------------------------------------
+  PIN_UNUSED:
+    type: u8
+    value: 0xFF
+    description: >
+      A pin field that does not apply to this bus protocol. Which fields apply
+      is declared per protocol under enums.bus_protocol[*].pins.
+
+  # --- wildcards: "apply to all" -------------------------------------------
+  DEV_ID_ALL:
+    type: u8
+    value: 0xFF
+    description: "In a request, address every device on the bus rather than one."
+
+  FAULT_ID_ALL:
+    type: u8
+    value: 0xFF
+    description: "In FAULT_CLEAR, clear every fault on the device."
+
+  # --- absence: "not applicable" -------------------------------------------
+  DEV_ID_NONE:
+    type: u8
+    value: 0xFF
+    description: "In a report, no device matched. Distinct in meaning from DEV_ID_ALL despite sharing a value."
+
+  BUS_ID_NONE:
+    type: u8
+    value: 0xFF
+    description: "In EVT_ERROR, the error is not specific to a bus."
+
+  # --- counts --------------------------------------------------------------
+  FAULT_REPEAT_UNLIMITED:
+    type: u16
+    value: 0xFFFF
+    description: "A fault that never auto-clears. It fires until explicitly cleared."

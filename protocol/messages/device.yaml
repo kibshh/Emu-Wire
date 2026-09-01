@@ -1,0 +1,79 @@
+# Device messages — devices attach to a bus
+#
+# Part of the EmuWire protocol spec. Entry point: protocol/protocol.yaml
+# Merged by protocol/codegen.py — see protocol.yaml for ID allocation rules.
+
+messages:
+
+  DEV_ATTACH:
+    id: 0x20
+    group: device
+    direction: host_to_device
+    description: >
+      Attach an emulated device to an existing bus. The host has already
+      merged manifest defaults with user overrides, so the register list here
+      is the resolved initial state. Attaching two devices at the same address
+      on one bus is rejected — it is physically impossible on real hardware
+      and must not be modelled.
+
+      For maps too large for one frame, attach with reg_count = 0 and fill
+      with DEV_WRITE_REGS; register flags then take their defaults.
+    request:
+      - {name: bus_id,         type: u8}
+      - {name: address_mode,   type: u8,  enum: address_mode}
+      - {name: address,        type: u16, description: "Interpretation depends on address_mode: a 7-bit address in the low bits, a full 10-bit address, or a chip-select index for ADDR_CHIP_SELECT."}
+      - {name: reg_addr_width, type: u8,  enum: reg_addr_width}
+      - {name: auto_increment, type: u8,  enum: auto_increment}
+      - {name: flags,          type: u8,  bitmask: device_flags}
+      - {name: _pad,           type: u8}
+      - {name: clock_max_hz,   type: u32, description: "The part's rated maximum. Clocking above it must misbehave realistically, never silently work."}
+      - {name: name,           type: char, count: 16, description: "Manifest name, NUL padded. Used in error messages so they name the device."}
+      - {name: reg_count,      type: u16}
+      - {name: registers,      type: struct, struct: register_def, count_field: reg_count}
+    response:
+      - {name: status, type: u8, enum: status}
+      - {name: dev_id, type: u8}
+
+  DEV_DETACH:
+    id: 0x21
+    group: device
+    direction: host_to_device
+    description: "Remove a device, free its slot and clear its address from the bus lookup."
+    request:
+      - {name: bus_id, type: u8}
+      - {name: dev_id, type: u8}
+    response:
+      - {name: status, type: u8, enum: status}
+
+  DEV_WRITE_REGS:
+    id: 0x22
+    group: device
+    direction: host_to_device
+    description: >
+      Set register contents from the host mid-test — this is what makes
+      bmp.set(...) change what the DUT reads on its next transaction.
+      Writes a contiguous run starting at start_reg.
+    request:
+      - {name: bus_id,    type: u8}
+      - {name: dev_id,    type: u8}
+      - {name: start_reg, type: u16}
+      - {name: count,     type: u16}
+      - {name: data,      type: u8, count_field: count}
+    response:
+      - {name: status, type: u8, enum: status}
+
+  DEV_READ_REGS:
+    id: 0x23
+    group: device
+    direction: host_to_device
+    description: "Read back register contents, including what the DUT wrote to config registers."
+    request:
+      - {name: bus_id,    type: u8}
+      - {name: dev_id,    type: u8}
+      - {name: start_reg, type: u16}
+      - {name: count,     type: u16}
+    response:
+      - {name: status, type: u8, enum: status}
+      - {name: count,  type: u16}
+      - {name: data,   type: u8, count_field: count}
+

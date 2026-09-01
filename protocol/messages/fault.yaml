@@ -1,0 +1,57 @@
+# Fault messages — faults attach to a device, not a bus
+#
+# Part of the EmuWire protocol spec. Entry point: protocol/protocol.yaml
+# Merged by protocol/codegen.py — see protocol.yaml for ID allocation rules.
+
+messages:
+
+  FAULT_SET:
+    id: 0x30
+    group: fault
+    direction: host_to_device
+    description: >
+      Arm a fault on a device. Faults attach to a device, not a bus. See the
+      fault_type and fault_trigger enums for what param_a, param_b, trigger_n
+      and trigger_reg mean for each combination.
+    request:
+      - {name: bus_id,          type: u8}
+      - {name: dev_id,          type: u8}
+      - {name: fault_type,      type: u8,  enum: fault_type}
+      - {name: trigger,         type: u8,  enum: fault_trigger}
+      - {name: trigger_reg,     type: u16}
+      - {name: repeat_count,    type: u16, description: "Firings before auto-clear. FAULT_REPEAT_UNLIMITED to fire until explicitly cleared."}
+      - {name: trigger_n,       type: u32}
+      - {name: param_a,         type: u32}
+      - {name: param_b,         type: u32}
+      - {name: probability_pct, type: u8,  description: "1-100, for the RANDOM trigger. Ignored otherwise."}
+      - {name: _pad,            type: u8}
+      - {name: _pad2,           type: u16}
+    response:
+      - {name: status,   type: u8, enum: status}
+      - {name: fault_id, type: u8}
+
+  FAULT_CLEAR:
+    id: 0x31
+    group: fault
+    direction: host_to_device
+    description: "Disarm one fault, or every fault on a device."
+    request:
+      - {name: bus_id,   type: u8}
+      - {name: dev_id,   type: u8}
+      - {name: fault_id, type: u8, description: "FAULT_ID_ALL clears every fault on the device."}
+    response:
+      - {name: status, type: u8, enum: status}
+
+  FAULT_LIST:
+    id: 0x32
+    group: fault
+    direction: host_to_device
+    description: "Enumerate armed faults, with how many firings remain and how many have happened."
+    request:
+      - {name: bus_id, type: u8}
+      - {name: dev_id, type: u8, description: "DEV_ID_ALL lists faults on every device on the bus."}
+    response:
+      - {name: status, type: u8, enum: status}
+      - {name: count,  type: u8}
+      - {name: faults, type: struct, struct: fault_info, count_field: count}
+

@@ -1,0 +1,40 @@
+# Trace messages — passive capture
+#
+# Part of the EmuWire protocol spec. Entry point: protocol/protocol.yaml
+# Merged by protocol/codegen.py — see protocol.yaml for ID allocation rules.
+
+messages:
+
+  TRACE_START:
+    id: 0x40
+    group: trace
+    direction: host_to_device
+    description: >
+      Begin capturing on a bus. Capture is passive — the sniffer state machine
+      keeps its pins as inputs permanently and must not perturb the bus it
+      observes.
+    request:
+      - {name: bus_id,    type: u8}
+      - {name: flags,     type: u8, bitmask: trace_flags}
+      - {name: _pad,      type: u16}
+      - {name: max_bytes, type: u32, description: "Cap on buffer use. 0 means all available."}
+    response:
+      - {name: status, type: u8, enum: status}
+
+  TRACE_STOP:
+    id: 0x41
+    group: trace
+    direction: host_to_device
+    description: >
+      Stop capturing and report totals. `dropped_edges` and `overflowed` are
+      mandatory reading: a trace with an unreported gap is worse than no trace,
+      because the user trusts it. The in-stream OVERFLOW_GAP record marks where.
+    request:
+      - {name: bus_id, type: u8}
+    response:
+      - {name: status,          type: u8,  enum: status}
+      - {name: overflowed,      type: u8,  description: "1 if the buffer ever overflowed during this capture."}
+      - {name: _pad,            type: u16}
+      - {name: captured_edges, type: u32}
+      - {name: dropped_edges,  type: u32, description: "Edges lost to overflow. Never silently zero — this is the honesty guarantee."}
+

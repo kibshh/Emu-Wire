@@ -1,0 +1,59 @@
+# I2C — pin roles, addressing, speed grades, supported faults
+#
+# Part of the EmuWire protocol spec. Entry point: protocol/protocol.yaml
+#
+# Each bus protocol is defined in exactly one file. codegen synthesises the
+# wire-level `bus_protocol` enum from the `buses` entries across this
+# directory, so adding a protocol means adding a file — not editing a shared
+# enum and hoping every related table gets updated with it.
+
+buses:
+
+  I2C:
+    id: 0x01
+    description: >
+      Two-wire open-drain bus. One PIO state machine answers every device on
+      it, which is the capability fixed-peripheral hardware cannot offer.
+
+    # Maps each BUS_CREATE pin field to the signal it carries. A null role
+    # means the field does not apply and must be set to PIN_UNUSED.
+    pins:
+      clk_pin:  SCL
+      dat0_pin: SDA
+      dat1_pin: null
+      cs_pin:   null
+
+    address_modes: [ADDR_7BIT, ADDR_10BIT]
+
+    # Reserved by the I2C specification. The SDK rejects these before anything
+    # reaches the board and the manifest linter rejects them at author time: a
+    # device claiming one is a manifest bug, not a configuration choice.
+    reserved_addresses:
+      - {first: 0x00, last: 0x07, reason: "General call, START byte, CBUS, and reserved for future use"}
+      - {first: 0x78, last: 0x7F, reason: "10-bit addressing prefix and reserved for future use"}
+
+    # max_rise_ns is the specification's limit on how slowly a line may rise.
+    # It is not trivia: with tr ~= 0.85 * Rp * Cb and ~100 pF of breadboard
+    # capacitance, a 4.7k pull-up gives ~400 ns and cannot meet FAST, let
+    # alone FAST_PLUS. Bench setups fail this before the firmware does.
+    speeds:
+      STANDARD:  {hz: 100000,  max_rise_ns: 1000}
+      FAST:      {hz: 400000,  max_rise_ns: 300}
+      FAST_PLUS: {hz: 1000000, max_rise_ns: 120}
+
+    # Which fault_type values are meaningful on this bus. FAULT_SET returns
+    # ERR_UNSUPPORTED_FAULT for anything absent here, rather than accepting a
+    # fault that could never fire.
+    supported_faults:
+      - NACK_ON_READ
+      - NACK_ON_WRITE
+      - BUS_HANG
+      - CORRUPT_REGISTER
+      - OUT_OF_RANGE
+      - STUCK_VALUE
+      - CLOCK_STRETCH
+      - SETUP_VIOLATION
+      - HOLD_VIOLATION
+      - PARTIAL_BYTE
+      - ACK_GLITCH
+      - CLOCK_SKEW
