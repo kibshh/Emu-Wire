@@ -17,8 +17,9 @@ constants:
     type: u8
     value: 0xFF
     description: >
-      A pin field that does not apply to this bus protocol. Which fields apply
-      is declared per protocol under enums.bus_protocol[*].pins.
+      Sent in a BUS_CREATE pin field that the chosen protocol does not use —
+      I2C has no MISO or CS, so both are PIN_UNUSED. Each bus file declares
+      which of its pin fields carry a signal and which are unused.
 
   # --- wildcards: "apply to all" -------------------------------------------
   DEV_ID_ALL:

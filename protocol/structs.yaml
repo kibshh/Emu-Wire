@@ -43,7 +43,9 @@ structs:
       - {name: trigger,          type: u8,  enum: fault_trigger}
       - {name: probability_pct,  type: u8}
       - {name: trigger_reg,      type: u16}
+      - {name: target_reg,       type: u16}
       - {name: remaining,        type: u16, description: "Firings left. FAULT_REPEAT_UNLIMITED if the fault never auto-clears."}
+      - {name: _pad,             type: u16}
       - {name: trigger_n,        type: u32}
       - {name: param_a,          type: u32}
       - {name: param_b,          type: u32}

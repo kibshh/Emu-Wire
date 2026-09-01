@@ -52,12 +52,12 @@ enums:
     type: u8
     values:
       # Emulation-layer faults — implemented on core 1, not in PIO.
-      NACK_ON_READ:     {value: 0x01, params: "param_a = number of reads to NACK"}
-      NACK_ON_WRITE:    {value: 0x02, params: "param_a = number of writes to NACK"}
+      NACK_ON_READ:     {value: 0x01, params: "none — how many reads to NACK is repeat_count, when to start is trigger"}
+      NACK_ON_WRITE:    {value: 0x02, params: "none — how many writes to NACK is repeat_count, when to start is trigger"}
       BUS_HANG:         {value: 0x03, params: "param_a = hold duration in us, 0 = indefinite"}
-      CORRUPT_REGISTER: {value: 0x04, params: "trigger_reg = register, param_a = XOR mask"}
-      OUT_OF_RANGE:     {value: 0x05, params: "trigger_reg = register, param_a = value to substitute"}
-      STUCK_VALUE:      {value: 0x06, params: "trigger_reg = register; freezes it against set()"}
+      CORRUPT_REGISTER: {value: 0x04, params: "target_reg = register to corrupt, param_a = XOR mask"}
+      OUT_OF_RANGE:     {value: 0x05, params: "target_reg = register, param_a = value to substitute"}
+      STUCK_VALUE:      {value: 0x06, params: "target_reg = register; freezes it against set()"}
       CLOCK_STRETCH:    {value: 0x07, params: "param_a = stretch duration in us"}
       # PIO-layer timing faults — branch targets inside i2c_slave.pio. These
       # are the differentiator: no fixed-peripheral tool can produce them.

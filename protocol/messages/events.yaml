@@ -68,5 +68,5 @@ messages:
       - {name: dev_id,       type: u8,  description: "DEV_ID_NONE if the error is not specific to a device."}
       - {name: _pad,         type: u8}
       - {name: _pad2,        type: u16}
-      - {name: detail,       type: u32, description: "Code-specific: the offending value, count, or measured frequency."}
+      - {name: detail,       type: u32, description: "Code-specific: the offending value, count, or measured frequency. For ERR_INTERNAL it is a firmware-defined assertion-site id — the wire carries no strings, so a site number is how a crash location reaches a bug report."}
       - {name: timestamp_us, type: u64}

@@ -236,23 +236,27 @@ typedef struct __attribute__((packed)) {
     uint8_t trigger;  /* fault_trigger */
     uint8_t probability_pct;
     uint16_t trigger_reg;
+    uint16_t target_reg;
     uint16_t remaining;
+    uint16_t _pad;
     uint32_t trigger_n;
     uint32_t param_a;
     uint32_t param_b;
     uint32_t fired_count;
 } emuwire_fault_info_t;
-_Static_assert(sizeof(emuwire_fault_info_t) == 24, "emuwire_fault_info_t must be 24 bytes — packing changed");
+_Static_assert(sizeof(emuwire_fault_info_t) == 28, "emuwire_fault_info_t must be 28 bytes — packing changed");
 #define EMUWIRE_FAULT_INFO_FAULT_ID_OFFSET 0u
 #define EMUWIRE_FAULT_INFO_FAULT_TYPE_OFFSET 1u
 #define EMUWIRE_FAULT_INFO_TRIGGER_OFFSET 2u
 #define EMUWIRE_FAULT_INFO_PROBABILITY_PCT_OFFSET 3u
 #define EMUWIRE_FAULT_INFO_TRIGGER_REG_OFFSET 4u
-#define EMUWIRE_FAULT_INFO_REMAINING_OFFSET 6u
-#define EMUWIRE_FAULT_INFO_TRIGGER_N_OFFSET 8u
-#define EMUWIRE_FAULT_INFO_PARAM_A_OFFSET 12u
-#define EMUWIRE_FAULT_INFO_PARAM_B_OFFSET 16u
-#define EMUWIRE_FAULT_INFO_FIRED_COUNT_OFFSET 20u
+#define EMUWIRE_FAULT_INFO_TARGET_REG_OFFSET 6u
+#define EMUWIRE_FAULT_INFO_REMAINING_OFFSET 8u
+#define EMUWIRE_FAULT_INFO__PAD_OFFSET 10u
+#define EMUWIRE_FAULT_INFO_TRIGGER_N_OFFSET 12u
+#define EMUWIRE_FAULT_INFO_PARAM_A_OFFSET 16u
+#define EMUWIRE_FAULT_INFO_PARAM_B_OFFSET 20u
+#define EMUWIRE_FAULT_INFO_FIRED_COUNT_OFFSET 24u
 
 /* One raw pin-state sample, streamed inside EVT_TRACE_DATA. */
 typedef struct __attribute__((packed)) {
@@ -478,13 +482,13 @@ typedef struct __attribute__((packed)) {
     uint8_t fault_type;  /* fault_type */
     uint8_t trigger;  /* fault_trigger */
     uint16_t trigger_reg;
+    uint16_t target_reg;
     uint16_t repeat_count;
+    uint8_t probability_pct;
+    uint8_t _pad;
     uint32_t trigger_n;
     uint32_t param_a;
     uint32_t param_b;
-    uint8_t probability_pct;
-    uint8_t _pad;
-    uint16_t _pad2;
 } emuwire_fault_set_request_t;
 _Static_assert(sizeof(emuwire_fault_set_request_t) == 24, "emuwire_fault_set_request_t must be 24 bytes — packing changed");
 #define EMUWIRE_FAULT_SET_REQUEST_BUS_ID_OFFSET 0u
@@ -492,13 +496,13 @@ _Static_assert(sizeof(emuwire_fault_set_request_t) == 24, "emuwire_fault_set_req
 #define EMUWIRE_FAULT_SET_REQUEST_FAULT_TYPE_OFFSET 2u
 #define EMUWIRE_FAULT_SET_REQUEST_TRIGGER_OFFSET 3u
 #define EMUWIRE_FAULT_SET_REQUEST_TRIGGER_REG_OFFSET 4u
-#define EMUWIRE_FAULT_SET_REQUEST_REPEAT_COUNT_OFFSET 6u
-#define EMUWIRE_FAULT_SET_REQUEST_TRIGGER_N_OFFSET 8u
-#define EMUWIRE_FAULT_SET_REQUEST_PARAM_A_OFFSET 12u
-#define EMUWIRE_FAULT_SET_REQUEST_PARAM_B_OFFSET 16u
-#define EMUWIRE_FAULT_SET_REQUEST_PROBABILITY_PCT_OFFSET 20u
-#define EMUWIRE_FAULT_SET_REQUEST__PAD_OFFSET 21u
-#define EMUWIRE_FAULT_SET_REQUEST__PAD2_OFFSET 22u
+#define EMUWIRE_FAULT_SET_REQUEST_TARGET_REG_OFFSET 6u
+#define EMUWIRE_FAULT_SET_REQUEST_REPEAT_COUNT_OFFSET 8u
+#define EMUWIRE_FAULT_SET_REQUEST_PROBABILITY_PCT_OFFSET 10u
+#define EMUWIRE_FAULT_SET_REQUEST__PAD_OFFSET 11u
+#define EMUWIRE_FAULT_SET_REQUEST_TRIGGER_N_OFFSET 12u
+#define EMUWIRE_FAULT_SET_REQUEST_PARAM_A_OFFSET 16u
+#define EMUWIRE_FAULT_SET_REQUEST_PARAM_B_OFFSET 20u
 
 typedef struct __attribute__((packed)) {
     uint8_t status;  /* status */

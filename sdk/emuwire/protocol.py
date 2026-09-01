@@ -188,10 +188,10 @@ STATUS_MESSAGES: Dict[int, str] = {
     Status.ERR_BAD_CRC: "Frame CRC mismatch — expected {expected:#06x}, got {actual:#06x}.",
     Status.ERR_UNKNOWN_TYPE: "Unknown message type {type:#04x}. Firmware protocol version is {fw_version}, the SDK expects {sdk_version}.",
     Status.ERR_BAD_PARAM: "Parameter '{param}' is invalid: {reason}.",
-    Status.ERR_NO_SUCH_BUS: "No bus with id {bus_id}. Create one with i2c_bus() first.",
+    Status.ERR_NO_SUCH_BUS: "No bus with id {bus_id}. Create a bus before attaching devices to it. Live buses: {live}.",
     Status.ERR_NO_SUCH_DEVICE: "No device with id {dev_id} on bus {bus_id}.",
-    Status.ERR_ADDRESS_IN_USE: "Address {address:#04x} is already taken by '{existing}' on this bus. Two devices cannot share an address — that is physically impossible on real hardware.",
-    Status.ERR_ADDRESS_RESERVED: "Address {address:#04x} is reserved by the I2C specification. Reserved ranges are 0x00-0x07 and 0x78-0x7F.",
+    Status.ERR_ADDRESS_IN_USE: "{identity} on bus {bus_id} is already taken by '{existing}'. Two devices on one bus cannot share it — real hardware could not do that either.",
+    Status.ERR_ADDRESS_RESERVED: "Address {address:#04x} is reserved by the I2C specification and cannot be emulated. Reserved ranges: {ranges}.",
     Status.ERR_BUS_LIMIT: "All {max} buses are in use.",
     Status.ERR_DEVICE_LIMIT: "Bus {bus_id} already has the maximum of {max} devices.",
     Status.ERR_NO_FREE_SM: "No free PIO state machine. {in_use} of {total} are in use: {detail}.",
@@ -210,7 +210,7 @@ STATUS_MESSAGES: Dict[int, str] = {
     Status.ERR_CLOCK_OUT_OF_SPEC: "The DUT is clocking bus {bus_id} at {actual_hz} Hz, above the {max_hz} Hz rating of '{device}'. The device is misbehaving as real silicon would.",
     Status.ERR_BUSY: "Device is busy servicing the bus; retry.",
     Status.ERR_NOT_IMPLEMENTED: "'{feature}' is accepted by the protocol but not implemented in firmware {fw_version}.",
-    Status.ERR_INTERNAL: "Internal firmware error at {file}:{line}. This is a bug — please report it.",
+    Status.ERR_INTERNAL: "Internal firmware error at site {detail} in firmware {fw_version}. This is a bug — please report both numbers.",
 }
 
 class Capabilities(IntEnum):
@@ -314,16 +314,18 @@ class FaultInfo:
     trigger: int = 0
     probability_pct: int = 0
     trigger_reg: int = 0
+    target_reg: int = 0
     remaining: int = 0
+    _pad: int = 0
     trigger_n: int = 0
     param_a: int = 0
     param_b: int = 0
     fired_count: int = 0
-    FORMAT: ClassVar[str] = "<BBBBHHIIII"
-    FIXED_SIZE: ClassVar[int] = 24
+    FORMAT: ClassVar[str] = "<BBBBHHHHIIII"
+    FIXED_SIZE: ClassVar[int] = 28
 
     def pack(self) -> bytes:
-        out = struct.pack(self.FORMAT, self.fault_id, self.fault_type, self.trigger, self.probability_pct, self.trigger_reg, self.remaining, self.trigger_n, self.param_a, self.param_b, self.fired_count)
+        out = struct.pack(self.FORMAT, self.fault_id, self.fault_type, self.trigger, self.probability_pct, self.trigger_reg, self.target_reg, self.remaining, self._pad, self.trigger_n, self.param_a, self.param_b, self.fired_count)
         return out
 
     @classmethod
@@ -332,8 +334,8 @@ class FaultInfo:
             raise ValueError(
                 f'FaultInfo needs at least {cls.FIXED_SIZE} bytes, got {len(data)}'
             )
-        fault_id, fault_type, trigger, probability_pct, trigger_reg, remaining, trigger_n, param_a, param_b, fired_count = struct.unpack_from(cls.FORMAT, data, 0)
-        return cls(fault_id=fault_id, fault_type=fault_type, trigger=trigger, probability_pct=probability_pct, trigger_reg=trigger_reg, remaining=remaining, trigger_n=trigger_n, param_a=param_a, param_b=param_b, fired_count=fired_count)
+        fault_id, fault_type, trigger, probability_pct, trigger_reg, target_reg, remaining, _pad, trigger_n, param_a, param_b, fired_count = struct.unpack_from(cls.FORMAT, data, 0)
+        return cls(fault_id=fault_id, fault_type=fault_type, trigger=trigger, probability_pct=probability_pct, trigger_reg=trigger_reg, target_reg=target_reg, remaining=remaining, _pad=_pad, trigger_n=trigger_n, param_a=param_a, param_b=param_b, fired_count=fired_count)
 
 @dataclass
 class TraceEdge:
@@ -830,19 +832,19 @@ class FaultSetRequest:
     fault_type: int = 0
     trigger: int = 0
     trigger_reg: int = 0
+    target_reg: int = 0
     repeat_count: int = 0
+    probability_pct: int = 0
+    _pad: int = 0
     trigger_n: int = 0
     param_a: int = 0
     param_b: int = 0
-    probability_pct: int = 0
-    _pad: int = 0
-    _pad2: int = 0
     TYPE: ClassVar[int] = 0x30
-    FORMAT: ClassVar[str] = "<BBBBHHIIIBBH"
+    FORMAT: ClassVar[str] = "<BBBBHHHBBIII"
     FIXED_SIZE: ClassVar[int] = 24
 
     def pack(self) -> bytes:
-        out = struct.pack(self.FORMAT, self.bus_id, self.dev_id, self.fault_type, self.trigger, self.trigger_reg, self.repeat_count, self.trigger_n, self.param_a, self.param_b, self.probability_pct, self._pad, self._pad2)
+        out = struct.pack(self.FORMAT, self.bus_id, self.dev_id, self.fault_type, self.trigger, self.trigger_reg, self.target_reg, self.repeat_count, self.probability_pct, self._pad, self.trigger_n, self.param_a, self.param_b)
         return out
 
     @classmethod
@@ -851,8 +853,8 @@ class FaultSetRequest:
             raise ValueError(
                 f'FaultSetRequest needs at least {cls.FIXED_SIZE} bytes, got {len(data)}'
             )
-        bus_id, dev_id, fault_type, trigger, trigger_reg, repeat_count, trigger_n, param_a, param_b, probability_pct, _pad, _pad2 = struct.unpack_from(cls.FORMAT, data, 0)
-        return cls(bus_id=bus_id, dev_id=dev_id, fault_type=fault_type, trigger=trigger, trigger_reg=trigger_reg, repeat_count=repeat_count, trigger_n=trigger_n, param_a=param_a, param_b=param_b, probability_pct=probability_pct, _pad=_pad, _pad2=_pad2)
+        bus_id, dev_id, fault_type, trigger, trigger_reg, target_reg, repeat_count, probability_pct, _pad, trigger_n, param_a, param_b = struct.unpack_from(cls.FORMAT, data, 0)
+        return cls(bus_id=bus_id, dev_id=dev_id, fault_type=fault_type, trigger=trigger, trigger_reg=trigger_reg, target_reg=target_reg, repeat_count=repeat_count, probability_pct=probability_pct, _pad=_pad, trigger_n=trigger_n, param_a=param_a, param_b=param_b)
 
 @dataclass
 class FaultSetResponse:
