@@ -1,0 +1,41 @@
+# Lint config lives at the repo root so `ruff check .` behaves identically
+# locally and in CI. The SDK's own pyproject.toml handles packaging, not linting.
+
+target-version = "py39"   # the oldest Python the SDK supports
+line-length = 100
+
+exclude = [
+    ".venv",
+    "build",
+    # Generated from protocol/protocol.yaml by protocol/codegen.py.
+    # Never hand-edited, so never linted — fix the generator instead.
+    "sdk/emuwire/protocol.py",
+    # Ruff formats Python blocks inside Markdown. Documentation examples are
+    # laid out to be read — aligned trailing comments, deliberate spacing —
+    # and a formatter collapsing that is a docs regression, not a style fix.
+    "*.md",
+]
+
+# Honour the excludes above even when a path is named explicitly, so
+# `ruff check sdk/` does not report 61 problems in a generated file.
+force-exclude = true
+
+[lint]
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes
+    "I",         # import sorting
+    "B",         # bugbear
+    "UP",        # pyupgrade
+    "SIM",       # simplify
+    "RUF",       # ruff-specific
+]
+ignore = [
+    "E501",      # line length is handled by the formatter
+]
+
+[lint.per-file-ignores]
+"**/tests/**" = ["B011"]   # assert False is fine in tests
+
+[format]
+quote-style = "double"
