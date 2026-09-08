@@ -1,0 +1,90 @@
+name: python
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint and type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install linters
+        run: pip install --upgrade ruff mypy
+
+      # Lint whatever Python exists, wherever it lives — protocol/codegen.py
+      # arrives before the SDK package does, and it should be linted from day
+      # one rather than when someone remembers to add its path here.
+      - name: Detect Python sources
+        id: py
+        run: |
+          if find . -name '*.py' -not -path './.git/*' | grep -q .; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Python checks skipped::No .py files in the tree yet. This job runs for real once there are."
+          fi
+
+      - name: ruff check
+        if: steps.py.outputs.present == 'true'
+        run: ruff check --output-format=github .
+
+      - name: ruff format --check
+        if: steps.py.outputs.present == 'true'
+        run: ruff format --check --diff .
+
+      - name: mypy
+        if: steps.py.outputs.present == 'true'
+        run: mypy .
+
+  test:
+    name: unit tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 is the floor the SDK promises, so it is tested explicitly — a
+        # 3.10-only syntax slip is easy to make and invisible on a modern
+        # interpreter. 3.13 catches deprecations early.
+        python-version: ["3.9", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Detect SDK package
+        id: sdk
+        run: |
+          if [ -f sdk/pyproject.toml ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=SDK tests skipped::sdk/pyproject.toml does not exist yet."
+          fi
+
+      - name: Install SDK
+        if: steps.sdk.outputs.present == 'true'
+        run: |
+          pip install --upgrade pip
+          pip install -e "sdk/[dev]" || pip install -e sdk/ pytest
+
+      # Unit tests must pass with no board attached. The hardware-dependent
+      # suite under tests/ is deliberately not run here — it belongs on a
+      # self-hosted runner with real boards.
+      - name: pytest (no hardware)
+        if: steps.sdk.outputs.present == 'true'
+        run: pytest sdk/tests -q

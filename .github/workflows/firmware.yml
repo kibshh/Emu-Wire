@@ -1,0 +1,157 @@
+name: firmware
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Pinned to match tools/setup-windows.ps1 and tools/setup-ubuntu.sh.
+# CI, the build machine and the bench machine all use one toolchain version,
+# so a CI failure is never "works on my machine".
+env:
+  PICO_SDK_VERSION: "2.3.0"
+  PICO_TOOLS_TAG: "v2.3.0-1"
+  ARM_GCC_VERSION: "14.2.rel1"
+
+jobs:
+  build:
+    name: build (pico2 / RP2350)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # The firmware skeleton does not exist yet. Skip loudly rather than
+      # silently: an annotation appears on the run summary, so nobody mistakes
+      # "nothing to build" for "build passed".
+      - name: Detect firmware project
+        id: fw
+        run: |
+          if [ -f firmware/CMakeLists.txt ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Firmware build skipped::firmware/CMakeLists.txt does not exist yet. This job will build for real once the firmware skeleton lands."
+          fi
+
+      - name: Cache toolchain and SDK
+        if: steps.fw.outputs.present == 'true'
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.pico-sdk
+          key: pico-${{ runner.os }}-gcc${{ env.ARM_GCC_VERSION }}-sdk${{ env.PICO_SDK_VERSION }}
+
+      - name: Install Arm toolchain, SDK and tools
+        if: steps.fw.outputs.present == 'true' && steps.cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          ROOT="$HOME/.pico-sdk"
+          mkdir -p "$ROOT"
+
+          # Arm GNU toolchain — the official tarball, not apt's gcc-arm-none-eabi,
+          # so CI and developer machines produce identical binaries.
+          GCC_DIR="$ROOT/toolchain/$ARM_GCC_VERSION"
+          mkdir -p "$GCC_DIR"
+          curl -fL --retry 3 -o /tmp/armgcc.tar.xz \
+            "https://developer.arm.com/-/media/Files/downloads/gnu/$ARM_GCC_VERSION/binrel/arm-gnu-toolchain-$ARM_GCC_VERSION-x86_64-arm-none-eabi.tar.xz"
+          tar -xf /tmp/armgcc.tar.xz -C "$GCC_DIR" --strip-components=1
+
+          git clone -b "$PICO_SDK_VERSION" --depth 1 https://github.com/raspberrypi/pico-sdk.git "$ROOT/sdk"
+          git -C "$ROOT/sdk" submodule update --init --depth 1 lib/tinyusb
+
+          # pioasm assembles .pio files; picotool generates the .uf2 (SDK 2.x
+          # replaced elf2uf2 with it, so this is a build dependency, not just a
+          # flashing tool).
+          BASE="https://github.com/raspberrypi/pico-sdk-tools/releases/download/$PICO_TOOLS_TAG"
+          mkdir -p "$ROOT/tools/$PICO_SDK_VERSION" "$ROOT/picotool/$PICO_SDK_VERSION"
+          curl -fL --retry 3 "$BASE/pico-sdk-tools-$PICO_SDK_VERSION-x86_64-lin.tar.gz" \
+            | tar -xz -C "$ROOT/tools/$PICO_SDK_VERSION"
+          curl -fL --retry 3 "$BASE/picotool-$PICO_SDK_VERSION-x86_64-lin.tar.gz" \
+            | tar -xz -C "$ROOT/picotool/$PICO_SDK_VERSION"
+
+      - name: Set up environment
+        if: steps.fw.outputs.present == 'true'
+        run: |
+          ROOT="$HOME/.pico-sdk"
+          echo "PICO_SDK_PATH=$ROOT/sdk" >> "$GITHUB_ENV"
+          echo "PICO_TOOLCHAIN_PATH=$ROOT/toolchain/$ARM_GCC_VERSION" >> "$GITHUB_ENV"
+          echo "$ROOT/toolchain/$ARM_GCC_VERSION/bin" >> "$GITHUB_PATH"
+          echo "$ROOT/picotool/$PICO_SDK_VERSION/picotool" >> "$GITHUB_PATH"
+
+      - name: Install build tools
+        if: steps.fw.outputs.present == 'true'
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
+
+      - name: Configure
+        if: steps.fw.outputs.present == 'true'
+        run: |
+          cmake -S firmware -B firmware/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPICO_BOARD=pico2 -DPICO_PLATFORM=rp2350 \
+            -Dpioasm_DIR="$HOME/.pico-sdk/tools/$PICO_SDK_VERSION/pioasm" \
+            -Dpicotool_DIR="$HOME/.pico-sdk/picotool/$PICO_SDK_VERSION/picotool"
+
+      - name: Build
+        if: steps.fw.outputs.present == 'true'
+        run: cmake --build firmware/build
+
+      # An RP2040 build succeeds silently and produces a UF2 that simply will
+      # not run on a Pico 2. Assert the family ID rather than trusting the flags.
+      - name: Verify the UF2 targets RP2350
+        if: steps.fw.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          UF2=$(find firmware/build -name '*.uf2' | head -1)
+          if [ -z "$UF2" ]; then
+            echo "::error title=No UF2 produced::The build finished but emitted no .uf2. Is picotool wired in?"
+            exit 1
+          fi
+          picotool info -a "$UF2"
+          picotool info -a "$UF2" | grep -q 'rp2350-arm-s' || {
+            echo "::error title=Wrong target::UF2 is not an RP2350 image. Check PICO_BOARD/PICO_PLATFORM."
+            exit 1
+          }
+
+      # Useful with a split build/bench setup: build here, download the UF2 on
+      # whichever machine has the boards attached.
+      - name: Upload UF2
+        if: steps.fw.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: emuwire-uf2-${{ github.sha }}
+          path: firmware/build/**/*.uf2
+          if-no-files-found: error
+
+  pio-budget:
+    name: PIO instruction budget
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 32 instructions per PIO block, shared by that block's four state
+      # machines, is the tightest constraint in the firmware. pioasm runs on the
+      # host, so CI can enforce it with no hardware involved.
+      - name: Report program lengths
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(firmware/pio/*.pio)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::notice title=No PIO programs yet::firmware/pio/*.pio does not exist. This job will enforce the 32-instruction budget once it does."
+            exit 0
+          fi
+          BASE="https://github.com/raspberrypi/pico-sdk-tools/releases/download/$PICO_TOOLS_TAG"
+          mkdir -p /tmp/pioasm
+          curl -fL --retry 3 "$BASE/pico-sdk-tools-$PICO_SDK_VERSION-x86_64-lin.tar.gz" | tar -xz -C /tmp/pioasm
+          for f in "${files[@]}"; do
+            echo "=== $f ==="
+            /tmp/pioasm/pioasm/pioasm -o c-sdk "$f" /tmp/out.h
+            grep -E '_wrap(_target)? ' /tmp/out.h || true
+          done
