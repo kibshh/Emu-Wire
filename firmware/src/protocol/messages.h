@@ -39,7 +39,9 @@
 #define EMUWIRE_DEV_ID_ALL ((uint8_t)0xff)
 #define EMUWIRE_FAULT_ID_ALL ((uint8_t)0xff)
 #define EMUWIRE_DEV_ID_NONE ((uint8_t)0xff)
+#define EMUWIRE_MSG_TYPE_NONE ((uint8_t)0x0)
 #define EMUWIRE_BUS_ID_NONE ((uint8_t)0xff)
+#define EMUWIRE_REG_ANY ((uint16_t)0xffff)
 #define EMUWIRE_FAULT_REPEAT_UNLIMITED ((uint16_t)0xffff)
 
 /* ---- enums ---- */
@@ -115,11 +117,17 @@ typedef enum {
 
 typedef enum {
     EMUWIRE_FAULT_TRIGGER_IMMEDIATE = 0x00,
-    EMUWIRE_FAULT_TRIGGER_AFTER_N_ACCESS = 0x01,
-    EMUWIRE_FAULT_TRIGGER_ON_NTH_READ_REG = 0x02,
+    EMUWIRE_FAULT_TRIGGER_ON_NTH_ACCESS = 0x01,
+    EMUWIRE_FAULT_TRIGGER_RANDOM_ACCESS = 0x02,
     EMUWIRE_FAULT_TRIGGER_AFTER_MS = 0x03,
-    EMUWIRE_FAULT_TRIGGER_RANDOM = 0x04,
+    EMUWIRE_FAULT_TRIGGER_RANDOM_MS = 0x04,
 } emuwire_fault_trigger_t;
+
+typedef enum {
+    EMUWIRE_ACCESS_FILTER_ACCESS_READ = 0x00,
+    EMUWIRE_ACCESS_FILTER_ACCESS_WRITE = 0x01,
+    EMUWIRE_ACCESS_FILTER_ACCESS_ANY = 0x02,
+} emuwire_access_filter_t;
 
 typedef enum {
     EMUWIRE_BOARD_ID_UNKNOWN = 0x00,
@@ -138,10 +146,32 @@ typedef enum {
     EMUWIRE_RESET_MODE_BOOTSEL = 0x01,
 } emuwire_reset_mode_t;
 
-typedef enum {  /* synthesised from buses/ */
+typedef enum {  /* derived from buses/ */
     EMUWIRE_BUS_PROTOCOL_I2C = 0x01,
     EMUWIRE_BUS_PROTOCOL_SPI = 0x02,
 } emuwire_bus_protocol_t;
+
+typedef enum {  /* derived from messages/ */
+    EMUWIRE_MSG_TYPE_PING = 0x01,
+    EMUWIRE_MSG_TYPE_INFO = 0x02,
+    EMUWIRE_MSG_TYPE_RESET = 0x03,
+    EMUWIRE_MSG_TYPE_BUS_CREATE = 0x10,
+    EMUWIRE_MSG_TYPE_BUS_DESTROY = 0x11,
+    EMUWIRE_MSG_TYPE_BUS_LIST = 0x12,
+    EMUWIRE_MSG_TYPE_DEV_ATTACH = 0x20,
+    EMUWIRE_MSG_TYPE_DEV_DETACH = 0x21,
+    EMUWIRE_MSG_TYPE_DEV_WRITE_REGS = 0x22,
+    EMUWIRE_MSG_TYPE_DEV_READ_REGS = 0x23,
+    EMUWIRE_MSG_TYPE_FAULT_SET = 0x30,
+    EMUWIRE_MSG_TYPE_FAULT_CLEAR = 0x31,
+    EMUWIRE_MSG_TYPE_FAULT_LIST = 0x32,
+    EMUWIRE_MSG_TYPE_TRACE_START = 0x40,
+    EMUWIRE_MSG_TYPE_TRACE_STOP = 0x41,
+    EMUWIRE_MSG_TYPE_EVT_DEV_ACCESS = 0x80,
+    EMUWIRE_MSG_TYPE_EVT_FAULT_FIRED = 0x81,
+    EMUWIRE_MSG_TYPE_EVT_TRACE_DATA = 0x82,
+    EMUWIRE_MSG_TYPE_EVT_ERROR = 0x83,
+} emuwire_msg_type_t;
 
 /* ---- bitmasks ---- */
 #define EMUWIRE_CAPABILITIES_I2C ((uint16_t)(1u << 0))
@@ -159,31 +189,13 @@ typedef enum {  /* synthesised from buses/ */
 
 #define EMUWIRE_TRACE_FLAGS_STOP_ON_FULL ((uint8_t)(1u << 0))
 
+#define EMUWIRE_PIN_STATE_CLK ((uint8_t)(1u << 0))
+#define EMUWIRE_PIN_STATE_DAT0 ((uint8_t)(1u << 1))
+#define EMUWIRE_PIN_STATE_DAT1 ((uint8_t)(1u << 2))
+#define EMUWIRE_PIN_STATE_CS ((uint8_t)(1u << 3))
+
 #define EMUWIRE_TRACE_EDGE_FLAGS_OVERFLOW_GAP ((uint8_t)(1u << 0))
 #define EMUWIRE_TRACE_EDGE_FLAGS_WRAPPED ((uint8_t)(1u << 1))
-
-/* ---- message types ---- */
-typedef enum {
-    EMUWIRE_MSG_PING = 0x01,
-    EMUWIRE_MSG_INFO = 0x02,
-    EMUWIRE_MSG_RESET = 0x03,
-    EMUWIRE_MSG_BUS_CREATE = 0x10,
-    EMUWIRE_MSG_BUS_DESTROY = 0x11,
-    EMUWIRE_MSG_BUS_LIST = 0x12,
-    EMUWIRE_MSG_DEV_ATTACH = 0x20,
-    EMUWIRE_MSG_DEV_DETACH = 0x21,
-    EMUWIRE_MSG_DEV_WRITE_REGS = 0x22,
-    EMUWIRE_MSG_DEV_READ_REGS = 0x23,
-    EMUWIRE_MSG_FAULT_SET = 0x30,
-    EMUWIRE_MSG_FAULT_CLEAR = 0x31,
-    EMUWIRE_MSG_FAULT_LIST = 0x32,
-    EMUWIRE_MSG_TRACE_START = 0x40,
-    EMUWIRE_MSG_TRACE_STOP = 0x41,
-    EMUWIRE_MSG_EVT_DEV_ACCESS = 0x80,
-    EMUWIRE_MSG_EVT_FAULT_FIRED = 0x81,
-    EMUWIRE_MSG_EVT_TRACE_DATA = 0x82,
-    EMUWIRE_MSG_EVT_ERROR = 0x83,
-} emuwire_msg_type_t;
 
 /* Bit 7 marks an asynchronous event: no lookup needed to route a frame. */
 #define EMUWIRE_MSG_IS_ASYNC(t) (((t) & 0x80u) != 0u)
@@ -238,7 +250,8 @@ typedef struct __attribute__((packed)) {
     uint16_t trigger_reg;
     uint16_t target_reg;
     uint16_t remaining;
-    uint16_t _pad;
+    uint8_t access_filter;  /* access_filter */
+    uint8_t _pad;
     uint32_t trigger_n;
     uint32_t param_a;
     uint32_t param_b;
@@ -252,7 +265,8 @@ _Static_assert(sizeof(emuwire_fault_info_t) == 28, "emuwire_fault_info_t must be
 #define EMUWIRE_FAULT_INFO_TRIGGER_REG_OFFSET 4u
 #define EMUWIRE_FAULT_INFO_TARGET_REG_OFFSET 6u
 #define EMUWIRE_FAULT_INFO_REMAINING_OFFSET 8u
-#define EMUWIRE_FAULT_INFO__PAD_OFFSET 10u
+#define EMUWIRE_FAULT_INFO_ACCESS_FILTER_OFFSET 10u
+#define EMUWIRE_FAULT_INFO__PAD_OFFSET 11u
 #define EMUWIRE_FAULT_INFO_TRIGGER_N_OFFSET 12u
 #define EMUWIRE_FAULT_INFO_PARAM_A_OFFSET 16u
 #define EMUWIRE_FAULT_INFO_PARAM_B_OFFSET 20u
@@ -261,7 +275,7 @@ _Static_assert(sizeof(emuwire_fault_info_t) == 28, "emuwire_fault_info_t must be
 /* One raw pin-state sample, streamed inside EVT_TRACE_DATA. */
 typedef struct __attribute__((packed)) {
     uint32_t timestamp;
-    uint8_t pin_state;
+    uint8_t pin_state;  /* pin_state */
     uint8_t flags;  /* trace_edge_flags */
     uint16_t _pad;
 } emuwire_trace_edge_t;
@@ -485,7 +499,7 @@ typedef struct __attribute__((packed)) {
     uint16_t target_reg;
     uint16_t repeat_count;
     uint8_t probability_pct;
-    uint8_t _pad;
+    uint8_t access_filter;  /* access_filter */
     uint32_t trigger_n;
     uint32_t param_a;
     uint32_t param_b;
@@ -499,7 +513,7 @@ _Static_assert(sizeof(emuwire_fault_set_request_t) == 24, "emuwire_fault_set_req
 #define EMUWIRE_FAULT_SET_REQUEST_TARGET_REG_OFFSET 6u
 #define EMUWIRE_FAULT_SET_REQUEST_REPEAT_COUNT_OFFSET 8u
 #define EMUWIRE_FAULT_SET_REQUEST_PROBABILITY_PCT_OFFSET 10u
-#define EMUWIRE_FAULT_SET_REQUEST__PAD_OFFSET 11u
+#define EMUWIRE_FAULT_SET_REQUEST_ACCESS_FILTER_OFFSET 11u
 #define EMUWIRE_FAULT_SET_REQUEST_TRIGGER_N_OFFSET 12u
 #define EMUWIRE_FAULT_SET_REQUEST_PARAM_A_OFFSET 16u
 #define EMUWIRE_FAULT_SET_REQUEST_PARAM_B_OFFSET 20u
@@ -636,7 +650,7 @@ _Static_assert(sizeof(emuwire_evt_trace_data_payload_t) == 8, "emuwire_evt_trace
 
 typedef struct __attribute__((packed)) {
     uint8_t code;  /* status */
-    uint8_t context_type;
+    uint8_t context_type;  /* msg_type */
     uint8_t context_seq;
     uint8_t bus_id;
     uint8_t dev_id;

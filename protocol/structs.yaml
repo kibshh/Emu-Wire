@@ -45,7 +45,8 @@ structs:
       - {name: trigger_reg,      type: u16}
       - {name: target_reg,       type: u16}
       - {name: remaining,        type: u16, description: "Firings left. FAULT_REPEAT_UNLIMITED if the fault never auto-clears."}
-      - {name: _pad,             type: u16}
+      - {name: access_filter,    type: u8,  enum: access_filter}
+      - {name: _pad,             type: u8}
       - {name: trigger_n,        type: u32}
       - {name: param_a,          type: u32}
       - {name: param_b,          type: u32}
@@ -71,7 +72,7 @@ structs:
       8 bytes is a power of two so ring-buffer index arithmetic is a mask.
     fields:
       - {name: timestamp,  type: u32, description: "System timer ticks. Divide by INFO.trace_tick_hz for seconds. Wraps; the WRAPPED flag marks it."}
-      - {name: pin_state,  type: u8,  description: "bit0 = SCL/SCK, bit1 = SDA/MOSI, bit2 = MISO, bit3 = CS. Level after this edge."}
+      - {name: pin_state,  type: u8,  bitmask: pin_state, description: "Level of each line after this edge."}
       - {name: flags,      type: u8,  bitmask: trace_edge_flags}
       - {name: _pad,       type: u16}
 

@@ -26,27 +26,27 @@ messages:
       constants — sm_free and pio_instr_free change as buses are created.
     request: []
     response:
-      - {name: status,             type: u8,  enum: status}
-      - {name: protocol_version,   type: u16, description: "Must match the SDK's; refuse to proceed otherwise."}
-      - {name: fw_version_major,   type: u8}
-      - {name: fw_version_minor,   type: u8}
-      - {name: fw_version_patch,   type: u8}
-      - {name: board_id,           type: u8,  enum: board_id}
-      - {name: mcu_id,             type: u8,  enum: mcu_id}
-      - {name: pio_blocks,         type: u8}
-      - {name: sm_total,           type: u8}
-      - {name: sm_free,            type: u8}
-      - {name: pio_instr_free_0,   type: u8,  description: "Free instructions of 32 in PIO block 0."}
-      - {name: pio_instr_free_1,   type: u8}
-      - {name: pio_instr_free_2,   type: u8}
-      - {name: max_buses,          type: u8}
-      - {name: max_devices_per_bus, type: u8}
+      - {name: status,                type: u8,  enum: status}
+      - {name: protocol_version,      type: u16, description: "Must match the SDK's; refuse to proceed otherwise."}
+      - {name: fw_version_major,      type: u8}
+      - {name: fw_version_minor,      type: u8}
+      - {name: fw_version_patch,      type: u8}
+      - {name: board_id,              type: u8,  enum: board_id}
+      - {name: mcu_id,                type: u8,  enum: mcu_id}
+      - {name: pio_blocks,            type: u8}
+      - {name: sm_total,              type: u8}
+      - {name: sm_free,               type: u8}
+      - {name: pio_instr_free_0,      type: u8,  description: "Free instructions of 32 in PIO block 0."}
+      - {name: pio_instr_free_1,      type: u8}
+      - {name: pio_instr_free_2,      type: u8}
+      - {name: max_buses,             type: u8}
+      - {name: max_devices_per_bus,   type: u8}
       - {name: max_faults_per_device, type: u8}
-      - {name: max_payload_bytes,  type: u16}
-      - {name: capabilities,       type: u16, bitmask: capabilities, description: "What this build supports. Cleared bits are features not compiled in, not failures."}
-      - {name: trace_buffer_bytes, type: u32}
-      - {name: trace_tick_hz,      type: u32, description: "Tick rate of trace_edge.timestamp. The SDK needs this to convert to seconds; it also bounds the resolution the tracer can honestly claim."}
-      - {name: unique_id,          type: u64, description: "Board serial, for telling two attached boards apart."}
+      - {name: max_payload_bytes,     type: u16}
+      - {name: capabilities,          type: u16, bitmask: capabilities, description: "What this build supports. Cleared bits are features not compiled in, not failures."}
+      - {name: trace_buffer_bytes,    type: u32}
+      - {name: trace_tick_hz,         type: u32, description: "Tick rate of trace_edge.timestamp. The SDK needs this to convert to seconds; it also bounds the resolution the tracer can honestly claim."}
+      - {name: unique_id,             type: u64, description: "Board serial, for telling two attached boards apart."}
 
   RESET:
     id: 0x03

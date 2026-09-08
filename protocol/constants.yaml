@@ -38,10 +38,28 @@ constants:
     value: 0xFF
     description: "In a report, no device matched. Distinct in meaning from DEV_ID_ALL despite sharing a value."
 
+  MSG_TYPE_NONE:
+    type: u8
+    value: 0x00
+    description: >
+      In EVT_ERROR.context_type, the error was not caused by any message.
+      No message uses id 0x00, so this cannot collide with a real one.
+
   BUS_ID_NONE:
     type: u8
     value: 0xFF
     description: "In EVT_ERROR, the error is not specific to a bus."
+
+  # --- scope ---------------------------------------------------------------
+  REG_ANY:
+    type: u16
+    value: 0xFFFF
+    description: >
+      In FAULT_SET.trigger_reg, count accesses to any register rather than one.
+      Known limit: a 16-bit register map could in principle use 0xFFFF as a
+      real address, and such a register cannot be singled out as a trigger.
+      No part in the v1 catalogue does, and the manifest linter warns if one
+      appears.
 
   # --- counts --------------------------------------------------------------
   FAULT_REPEAT_UNLIMITED:

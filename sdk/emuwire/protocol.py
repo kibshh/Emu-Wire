@@ -28,7 +28,9 @@ PIN_UNUSED = 0xff
 DEV_ID_ALL = 0xff
 FAULT_ID_ALL = 0xff
 DEV_ID_NONE = 0xff
+MSG_TYPE_NONE = 0x0
 BUS_ID_NONE = 0xff
+REG_ANY = 0xffff
 FAULT_REPEAT_UNLIMITED = 0xffff
 
 # CRC-16/IBM-3740: poly=0x1021 init=0xffff refin=False refout=False xorout=0x0000
@@ -158,10 +160,15 @@ class FaultType(IntEnum):
 
 class FaultTrigger(IntEnum):
     IMMEDIATE = 0x00
-    AFTER_N_ACCESS = 0x01
-    ON_NTH_READ_REG = 0x02
+    ON_NTH_ACCESS = 0x01
+    RANDOM_ACCESS = 0x02
     AFTER_MS = 0x03
-    RANDOM = 0x04
+    RANDOM_MS = 0x04
+
+class AccessFilter(IntEnum):
+    ACCESS_READ = 0x00
+    ACCESS_WRITE = 0x01
+    ACCESS_ANY = 0x02
 
 class BoardId(IntEnum):
     UNKNOWN = 0x00
@@ -181,6 +188,27 @@ class BusProtocol(IntEnum):
     I2C = 0x01
     SPI = 0x02
 
+class MsgType(IntEnum):
+    PING = 0x01
+    INFO = 0x02
+    RESET = 0x03
+    BUS_CREATE = 0x10
+    BUS_DESTROY = 0x11
+    BUS_LIST = 0x12
+    DEV_ATTACH = 0x20
+    DEV_DETACH = 0x21
+    DEV_WRITE_REGS = 0x22
+    DEV_READ_REGS = 0x23
+    FAULT_SET = 0x30
+    FAULT_CLEAR = 0x31
+    FAULT_LIST = 0x32
+    TRACE_START = 0x40
+    TRACE_STOP = 0x41
+    EVT_DEV_ACCESS = 0x80
+    EVT_FAULT_FIRED = 0x81
+    EVT_TRACE_DATA = 0x82
+    EVT_ERROR = 0x83
+
 # Message templates, so no bare status code ever reaches a user.
 STATUS_MESSAGES: Dict[int, str] = {
     Status.OK: "Success.",
@@ -190,7 +218,7 @@ STATUS_MESSAGES: Dict[int, str] = {
     Status.ERR_BAD_PARAM: "Parameter '{param}' is invalid: {reason}.",
     Status.ERR_NO_SUCH_BUS: "No bus with id {bus_id}. Create a bus before attaching devices to it. Live buses: {live}.",
     Status.ERR_NO_SUCH_DEVICE: "No device with id {dev_id} on bus {bus_id}.",
-    Status.ERR_ADDRESS_IN_USE: "{identity} on bus {bus_id} is already taken by '{existing}'. Two devices on one bus cannot share it — real hardware could not do that either.",
+    Status.ERR_ADDRESS_IN_USE: "{identity} on bus {bus_id} is already taken by '{existing}'. Two devices on one bus can be wired to the same address, but both then ACK and reads return the AND of both, so this is rejected as almost certainly unintended.",
     Status.ERR_ADDRESS_RESERVED: "Address {address:#04x} is reserved by the I2C specification and cannot be emulated. Reserved ranges: {ranges}.",
     Status.ERR_BUS_LIMIT: "All {max} buses are in use.",
     Status.ERR_DEVICE_LIMIT: "Bus {bus_id} already has the maximum of {max} devices.",
@@ -231,6 +259,12 @@ class RegisterFlags(IntEnum):
 
 class TraceFlags(IntEnum):
     STOP_ON_FULL = 1 << 0
+
+class PinState(IntEnum):
+    CLK = 1 << 0
+    DAT0 = 1 << 1
+    DAT1 = 1 << 2
+    CS = 1 << 3
 
 class TraceEdgeFlags(IntEnum):
     OVERFLOW_GAP = 1 << 0
@@ -316,16 +350,17 @@ class FaultInfo:
     trigger_reg: int = 0
     target_reg: int = 0
     remaining: int = 0
+    access_filter: int = 0
     _pad: int = 0
     trigger_n: int = 0
     param_a: int = 0
     param_b: int = 0
     fired_count: int = 0
-    FORMAT: ClassVar[str] = "<BBBBHHHHIIII"
+    FORMAT: ClassVar[str] = "<BBBBHHHBBIIII"
     FIXED_SIZE: ClassVar[int] = 28
 
     def pack(self) -> bytes:
-        out = struct.pack(self.FORMAT, self.fault_id, self.fault_type, self.trigger, self.probability_pct, self.trigger_reg, self.target_reg, self.remaining, self._pad, self.trigger_n, self.param_a, self.param_b, self.fired_count)
+        out = struct.pack(self.FORMAT, self.fault_id, self.fault_type, self.trigger, self.probability_pct, self.trigger_reg, self.target_reg, self.remaining, self.access_filter, self._pad, self.trigger_n, self.param_a, self.param_b, self.fired_count)
         return out
 
     @classmethod
@@ -334,8 +369,8 @@ class FaultInfo:
             raise ValueError(
                 f'FaultInfo needs at least {cls.FIXED_SIZE} bytes, got {len(data)}'
             )
-        fault_id, fault_type, trigger, probability_pct, trigger_reg, target_reg, remaining, _pad, trigger_n, param_a, param_b, fired_count = struct.unpack_from(cls.FORMAT, data, 0)
-        return cls(fault_id=fault_id, fault_type=fault_type, trigger=trigger, probability_pct=probability_pct, trigger_reg=trigger_reg, target_reg=target_reg, remaining=remaining, _pad=_pad, trigger_n=trigger_n, param_a=param_a, param_b=param_b, fired_count=fired_count)
+        fault_id, fault_type, trigger, probability_pct, trigger_reg, target_reg, remaining, access_filter, _pad, trigger_n, param_a, param_b, fired_count = struct.unpack_from(cls.FORMAT, data, 0)
+        return cls(fault_id=fault_id, fault_type=fault_type, trigger=trigger, probability_pct=probability_pct, trigger_reg=trigger_reg, target_reg=target_reg, remaining=remaining, access_filter=access_filter, _pad=_pad, trigger_n=trigger_n, param_a=param_a, param_b=param_b, fired_count=fired_count)
 
 @dataclass
 class TraceEdge:
@@ -835,7 +870,7 @@ class FaultSetRequest:
     target_reg: int = 0
     repeat_count: int = 0
     probability_pct: int = 0
-    _pad: int = 0
+    access_filter: int = 0
     trigger_n: int = 0
     param_a: int = 0
     param_b: int = 0
@@ -844,7 +879,7 @@ class FaultSetRequest:
     FIXED_SIZE: ClassVar[int] = 24
 
     def pack(self) -> bytes:
-        out = struct.pack(self.FORMAT, self.bus_id, self.dev_id, self.fault_type, self.trigger, self.trigger_reg, self.target_reg, self.repeat_count, self.probability_pct, self._pad, self.trigger_n, self.param_a, self.param_b)
+        out = struct.pack(self.FORMAT, self.bus_id, self.dev_id, self.fault_type, self.trigger, self.trigger_reg, self.target_reg, self.repeat_count, self.probability_pct, self.access_filter, self.trigger_n, self.param_a, self.param_b)
         return out
 
     @classmethod
@@ -853,8 +888,8 @@ class FaultSetRequest:
             raise ValueError(
                 f'FaultSetRequest needs at least {cls.FIXED_SIZE} bytes, got {len(data)}'
             )
-        bus_id, dev_id, fault_type, trigger, trigger_reg, target_reg, repeat_count, probability_pct, _pad, trigger_n, param_a, param_b = struct.unpack_from(cls.FORMAT, data, 0)
-        return cls(bus_id=bus_id, dev_id=dev_id, fault_type=fault_type, trigger=trigger, trigger_reg=trigger_reg, target_reg=target_reg, repeat_count=repeat_count, probability_pct=probability_pct, _pad=_pad, trigger_n=trigger_n, param_a=param_a, param_b=param_b)
+        bus_id, dev_id, fault_type, trigger, trigger_reg, target_reg, repeat_count, probability_pct, access_filter, trigger_n, param_a, param_b = struct.unpack_from(cls.FORMAT, data, 0)
+        return cls(bus_id=bus_id, dev_id=dev_id, fault_type=fault_type, trigger=trigger, trigger_reg=trigger_reg, target_reg=target_reg, repeat_count=repeat_count, probability_pct=probability_pct, access_filter=access_filter, trigger_n=trigger_n, param_a=param_a, param_b=param_b)
 
 @dataclass
 class FaultSetResponse:

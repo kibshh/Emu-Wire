@@ -46,6 +46,18 @@ bitmasks:
       # Stop capturing when the buffer fills, rather than overwriting oldest.
       STOP_ON_FULL:  {bit: 0}
 
+  # The level of each captured line after an edge. Named for the BUS_CREATE
+  # pin fields rather than for I2C, because the sniffer captures whatever the
+  # bus uses: CLK is SCL on I2C and SCK on SPI. A bus that does not use a line
+  # leaves its bit clear.
+  pin_state:
+    type: u8
+    bits:
+      CLK:  {bit: 0}
+      DAT0: {bit: 1}
+      DAT1: {bit: 2}
+      CS:   {bit: 3}
+
   trace_edge_flags:
     type: u8
     bits:

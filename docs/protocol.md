@@ -32,7 +32,7 @@ Top-level keys are unioned across files. A key defined twice is an **error**, no
 
 Each protocol lives in exactly one file under `buses/`, declaring its wire id, which signal each `BUS_CREATE` pin field carries, and which `fault_type` values are meaningful on it.
 
-The `bus_protocol` enum is **synthesised** from those files — it isn't written by hand anywhere. That means a protocol cannot appear on the wire while its pin roles or fault support are missing, and adding 1-Wire or SENT later is one new file plus one line in `includes`.
+The `bus_protocol` enum is **derived** from those files — it isn't written by hand anywhere. That means a protocol cannot appear on the wire while its pin roles or fault support are missing, and adding 1-Wire or SENT later is one new file plus one line in `includes`.
 
 Declaring fault support as data also makes `ERR_UNSUPPORTED_FAULT` real rather than aspirational. SPI supports 6 of the 12 fault types, and the exclusions are structural rather than unimplemented:
 
@@ -224,10 +224,17 @@ ERR_PIN_UNAVAILABLE
   "Pin GP{pin} cannot be used for {function} on {board}. Valid pins are {valid}."
 
 ERR_ADDRESS_IN_USE
-  "Address {address:#04x} is already taken by '{existing}' on this bus.
-   Two devices cannot share an address — that is physically impossible on
-   real hardware."
+  "{identity} on bus {bus_id} is already taken by '{existing}'. Two devices
+   on one bus can be wired to the same address, but both then ACK and reads
+   return the AND of both, so this is rejected as almost certainly
+   unintended."
 ```
+
+That last one is worth spelling out, because it is a real hardware fault rather than an impossibility. Wire two parts to the same address and both match it. Both pull SDA low to acknowledge, which on an open-drain bus is indistinguishable from one device doing it, so the master sees a normal ACK. On a read both drive the bus, and the master receives the bitwise AND of the two bytes.
+
+Nothing reports an error. The driver simply reads wrong values. It is worst with two identical parts, whose factory calibration constants differ — the driver reads AND-ed calibration data and computes plausible, permanently wrong results.
+
+`DEV_ATTACH` refuses it because it is almost always a mistake, not because it cannot happen.
 
 ## Tracing carries raw edges
 

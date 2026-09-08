@@ -2,7 +2,7 @@
 #
 # Part of the EmuWire protocol spec. Entry point: protocol/protocol.yaml
 #
-# Each bus protocol is defined in exactly one file. codegen synthesises the
+# Each bus protocol is defined in exactly one file. codegen derives the
 # wire-level `bus_protocol` enum from the `buses` entries across this
 # directory, so adding a protocol means adding a file — not editing a shared
 # enum and hoping every related table gets updated with it.

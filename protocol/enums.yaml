@@ -7,7 +7,7 @@
 #
 # Per-bus semantics live in protocol/buses/<name>.yaml — which pin carries
 # which signal, which address modes apply, which of the fault_type values
-# below are meaningful. The `bus_protocol` enum is synthesised from those
+# below are meaningful. The `bus_protocol` enum is derived from those
 # files; it is deliberately not defined here, so adding a protocol means
 # adding one file rather than editing a shared enum and hoping every related
 # table is updated with it.
@@ -70,11 +70,29 @@ enums:
   fault_trigger:
     type: u8
     values:
-      IMMEDIATE:       {value: 0x00, params: "fires on the next matching access"}
-      AFTER_N_ACCESS:  {value: 0x01, params: "trigger_n = access count"}
-      ON_NTH_READ_REG: {value: 0x02, params: "trigger_reg = register, trigger_n = which read"}
-      AFTER_MS:        {value: 0x03, params: "trigger_n = milliseconds from arming"}
-      RANDOM:          {value: 0x04, params: "probability_pct = 1-100 per access"}
+      IMMEDIATE:     {value: 0x00, params: "fires on the next matching access"}
+      ON_NTH_ACCESS: {value: 0x01, params: "trigger_n = which matching access fires it"}
+      RANDOM_ACCESS: {value: 0x02, params: "probability_pct = 1-100 chance on each matching access"}
+      AFTER_MS:      {value: 0x03, params: "trigger_n = milliseconds from arming"}
+      RANDOM_MS:     {value: 0x04, params: "trigger_n = window in ms; fires once at a uniformly random point inside it, re-rolled for each repeat"}
+
+  # An access-counting trigger matches on two independent things, and they are
+  # kept as two fields rather than multiplied into more enum values:
+  #
+  #   which register   trigger_reg    a register, or REG_ANY for the whole device
+  #   read or write    access_filter  ACCESS_READ / ACCESS_WRITE / ACCESS_ANY
+  #
+  # So "the 3rd write to 0xF4" and "5% of reads anywhere on the device" are the
+  # same trigger with different scope, not different triggers.
+  #
+  # Separate from access_kind: that reports what the DUT did, this selects what
+  # to match. ACCESS_ANY has no meaning in a report and no place in that enum.
+  access_filter:
+    type: u8
+    values:
+      ACCESS_READ:  {value: 0x00}
+      ACCESS_WRITE: {value: 0x01}
+      ACCESS_ANY:   {value: 0x02}
 
   board_id:
     type: u8

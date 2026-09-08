@@ -20,7 +20,7 @@ enums:
       ERR_BAD_PARAM:            {value: 0x04, message: "Parameter '{param}' is invalid: {reason}."}
       ERR_NO_SUCH_BUS:          {value: 0x05, message: "No bus with id {bus_id}. Create a bus before attaching devices to it. Live buses: {live}."}
       ERR_NO_SUCH_DEVICE:       {value: 0x06, message: "No device with id {dev_id} on bus {bus_id}."}
-      ERR_ADDRESS_IN_USE:       {value: 0x07, message: "{identity} on bus {bus_id} is already taken by '{existing}'. Two devices on one bus cannot share it — real hardware could not do that either."}
+      ERR_ADDRESS_IN_USE:       {value: 0x07, message: "{identity} on bus {bus_id} is already taken by '{existing}'. Two devices on one bus can be wired to the same address, but both then ACK and reads return the AND of both, so this is rejected as almost certainly unintended."}
       ERR_ADDRESS_RESERVED:     {value: 0x08, message: "Address {address:#04x} is reserved by the I2C specification and cannot be emulated. Reserved ranges: {ranges}."}
       ERR_BUS_LIMIT:            {value: 0x09, message: "All {max} buses are in use."}
       ERR_DEVICE_LIMIT:         {value: 0x0A, message: "Bus {bus_id} already has the maximum of {max} devices."}

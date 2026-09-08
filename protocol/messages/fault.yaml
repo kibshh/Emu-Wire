@@ -18,11 +18,11 @@ messages:
       - {name: dev_id,          type: u8}
       - {name: fault_type,      type: u8,  enum: fault_type}
       - {name: trigger,         type: u8,  enum: fault_trigger}
-      - {name: trigger_reg,     type: u16, description: "WHEN: the register whose Nth read arms the fault, for the ON_NTH_READ_REG trigger. Ignored by every other trigger."}
+      - {name: trigger_reg,     type: u16, description: "WHEN, scope: which register the access-counting triggers watch. REG_ANY counts the whole device. Ignored by AFTER_MS and RANDOM_MS, which do not count accesses."}
       - {name: target_reg,      type: u16, description: "WHAT: the register a register-modifying fault acts on. Separate from trigger_reg so 'on the 3rd read of 0xD0, corrupt 0xF7' is expressible."}
       - {name: repeat_count,    type: u16, description: "HOW MANY times it fires before auto-clearing. FAULT_REPEAT_UNLIMITED to fire until explicitly cleared. This is the only count — a fault type never carries its own."}
-      - {name: probability_pct, type: u8,  description: "1-100, for the RANDOM trigger. Ignored otherwise."}
-      - {name: _pad,            type: u8}
+      - {name: probability_pct, type: u8,  description: "1-100, for the RANDOM_ACCESS trigger. Ignored otherwise."}
+      - {name: access_filter,   type: u8,  enum: access_filter, description: "WHEN, filter: read, write, or either. Ignored by AFTER_MS and RANDOM_MS."}
       - {name: trigger_n,       type: u32}
       - {name: param_a,         type: u32, description: "Fault-specific. See the params note on each fault_type value."}
       - {name: param_b,         type: u32, description: "Fault-specific. Only CLOCK_SKEW uses it."}

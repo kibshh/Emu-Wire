@@ -12,9 +12,14 @@ messages:
     description: >
       Attach an emulated device to an existing bus. The host has already
       merged manifest defaults with user overrides, so the register list here
-      is the resolved initial state. Attaching two devices at the same address
-      on one bus is rejected — it is physically impossible on real hardware
-      and must not be modelled.
+      is the resolved initial state.
+
+      Attaching two devices at the same address on one bus is rejected. Note
+      that this IS possible on real hardware, and is a real wiring mistake:
+      both parts ACK, and a read returns the bitwise AND of what each would
+      have sent, with no error reported anywhere. It is rejected because it
+      is almost always unintended, not because it cannot happen. Reproducing
+      it deliberately belongs in a fault, not in a silent attach.
 
       For maps too large for one frame, attach with reg_count = 0 and fill
       with DEV_WRITE_REGS; register flags then take their defaults.

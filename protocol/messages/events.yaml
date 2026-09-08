@@ -62,7 +62,7 @@ messages:
       answer the user trusts is worse than a crash.
     payload:
       - {name: code,         type: u8,  enum: status}
-      - {name: context_type, type: u8,  description: "Message type that caused it, or 0 if unsolicited."}
+      - {name: context_type, type: u8,  enum: msg_type, description: "The message that caused the error, or MSG_TYPE_NONE if unsolicited."}
       - {name: context_seq,  type: u8,  description: "SEQ of that message, or 0."}
       - {name: bus_id,       type: u8,  description: "BUS_ID_NONE if the error is not specific to a bus."}
       - {name: dev_id,       type: u8,  description: "DEV_ID_NONE if the error is not specific to a device."}

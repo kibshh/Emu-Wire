@@ -44,19 +44,23 @@ includes:
   - messages/events.yaml    # EVT_DEV_ACCESS, EVT_FAULT_FIRED, EVT_TRACE_DATA, EVT_ERROR
 
 # ---------------------------------------------------------------------------
-# Bus protocols
+# Enums built from other sections
 # ---------------------------------------------------------------------------
-# Each protocol is defined in exactly one file under buses/. Codegen builds
-# the wire-level `bus_protocol` enum from their `id` fields — it is not
-# written by hand anywhere, so a protocol cannot exist in the enum while its
-# pin roles, address modes or supported faults are missing.
-#
-# Adding a protocol (1-Wire, SENT, LIN, …) is therefore one new file plus one
-# line in `includes` above.
-synthesised_enums:
+# These are not written out by hand. Codegen takes each entry of the named
+# section and uses its key as the enum label and its `id` as the value, so
+# the enum cannot fall out of step with the thing it describes.
+derived_enums:
   bus_protocol:
     type: u8
     from: buses          # key becomes the enum name, `id` becomes its value
+
+  # Every message id, as an enum. Built from the message catalogue so it can
+  # never disagree with it, and so a field carrying a message type — such as
+  # EVT_ERROR.context_type — can reference it instead of being a bare u8 with
+  # the meaning written in prose.
+  msg_type:
+    type: u8
+    from: messages
 
 # ---------------------------------------------------------------------------
 # Message type ID allocation
@@ -81,24 +85,20 @@ id_ranges:
   async:  [0x80, 0xFF]
 
 # ---------------------------------------------------------------------------
-# Rules the loader must enforce
+# Validation
 # ---------------------------------------------------------------------------
-# These are invariants, not style. Each one exists because breaking it
-# produces a failure that is silent on the wire and expensive to find.
-validation:
-  - unique_message_ids            # two messages sharing an ID
-  - ids_within_group_range        # an ID outside its group's reserved range
-  - async_bit_matches_group       # bit 7 disagreeing with `group: async`
-  - references_resolve            # an enum/bitmask/struct name that does not exist
-  - count_field_exists            # a variable-length field whose count is not a sibling
-  - response_starts_with_status   # a command whose failure mode is unreadable
-  - async_has_no_request          # an event modelled as if it were a command
-  - repeated_structs_fixed_size   # variable-length records in a DMA ring buffer
-  - bus_pins_match_bus_create     # a pin role map that has drifted from the message
-  - bus_faults_exist              # a supported_faults entry that is not a fault_type
-  - bus_address_modes_exist       # an address_modes entry that is not an address_mode
-  - bus_declares_address_modes    # a bus with no way to identify a device
-  - address_modes_claimed_by_a_bus # an address_mode value no bus accepts
-  - bus_ids_unique                # two protocols claiming the same wire value
-  - bitmask_bits_unique_and_in_range
-  - no_duplicate_keys_across_files
+# The spec is checked before anything is emitted, and codegen refuses to write
+# a file if any check fails.
+#
+# The rules live in protocol/codegen.py, not here, because that is the only
+# place that can act on them. A list in this file could either be
+# authoritative — and then deleting a line would silently switch a check off,
+# which is not an invariant — or it could be a copy that goes stale. Neither
+# is worth having.
+#
+#   python protocol/codegen.py --rules    # what is enforced, and why
+#
+# The rules that constrain the wire format rather than the spec file — the
+# async bit, status first in every response, fixed-size repeated structs,
+# permanent ids — are explained in docs/protocol.md, which is where someone
+# writing a client in another language will look.

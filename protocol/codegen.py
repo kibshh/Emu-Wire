@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
 """Generate the firmware header and host SDK module from the protocol spec.
 
-    python protocol/codegen.py            # regenerate
-    python protocol/codegen.py --check    # fail if output would differ (CI)
+    python protocol/codegen.py            # regenerate both outputs
+    python protocol/codegen.py --check    # fail if the committed output is
+                                          # stale, naming the file (used by CI)
+    python protocol/codegen.py --rules    # list the checks run against the
+                                          # spec, and what each one catches
 
 Reads protocol/protocol.yaml, merges the files it includes, validates the
-result against the invariants that file declares, and emits:
+result, and emits:
 
     firmware/src/protocol/messages.h
     sdk/emuwire/protocol.py
+
+Validation runs before anything is written, so a spec that breaks an invariant
+produces no output at all rather than output that is quietly wrong. The rules
+live here, in RULES, rather than in the spec: a list in the spec could either
+be authoritative — and then deleting a line would switch a check off — or a
+copy that goes stale. `--rules` prints them with the reason each exists.
 
 Neither output is ever hand-edited. Output is deterministic — no timestamps,
 no dict iteration order that depends on anything but the source files — so a
@@ -56,6 +65,21 @@ PY_FMT = {
     "char": "s",
 }
 
+# Every key a field may carry. Anything else is a typo, and a typo that is
+# ignored rather than reported produces a header that looks right and is
+# missing an annotation.
+FIELD_KEYS = {
+    "name",  # required
+    "type",  # required
+    "count",  # fixed-length array
+    "count_field",  # variable-length: names the sibling holding the count
+    "enum",  # value is drawn from this enum
+    "bitmask",  # value is a set of these flags
+    "struct",  # with type: struct, names the struct
+    "description",
+    "value",  # frame fields only: a fixed constant such as MAGIC
+}
+
 
 # ---------------------------------------------------------------------------
 # Load
@@ -92,13 +116,13 @@ def load() -> dict[str, Any]:
 
     # bus_protocol is built from buses/*.yaml rather than written by hand, so a
     # protocol cannot reach the wire without its pin roles and fault support.
-    for name, rule in root.get("synthesised_enums", {}).items():
+    for name, rule in root.get("derived_enums", {}).items():
         if name in spec.get("enums", {}):
-            problems.append(f"'{name}' is synthesised but also defined by hand")
+            problems.append(f"'{name}' is derived but also defined by hand")
         source = spec[rule["from"]]
         spec["enums"][name] = {
             "type": rule["type"],
-            "synthesised_from": rule["from"],
+            "derived_from": rule["from"],
             "values": {k: {"value": v["id"]} for k, v in source.items()},
         }
 
@@ -112,19 +136,85 @@ def load() -> dict[str, Any]:
 
 
 def fixed_size(fields: list[dict], spec: dict[str, Any]) -> int | None:
-    """Byte size, or None if the field list has a variable-length tail."""
+    """Byte size, or None if the field list has a variable-length tail.
+
+    Also returns None for a field whose type or struct name is unknown.
+    Validation reports those separately; this must not raise, or the first
+    bad field would abort the run before the rest were reported.
+    """
     total = 0
     for f in fields:
         if "count_field" in f:
             return None
-        if f["type"] == "struct":
+        ftype = f.get("type")
+        if ftype == "struct":
+            if f.get("struct") not in spec["structs"]:
+                return None
             sub = fixed_size(spec["structs"][f["struct"]]["fields"], spec)
             if sub is None:
                 return None
             total += sub
+        elif ftype in WIDTH:
+            total += WIDTH[ftype] * f.get("count", 1)
         else:
-            total += WIDTH[f["type"]] * f.get("count", 1)
+            return None
     return total
+
+
+# What validate() enforces, and why each one matters. This is the only list —
+# protocol.yaml deliberately does not repeat it. A copy there could either
+# switch a check off when a line was deleted, or go stale; neither is useful.
+# Printed by --rules.
+RULES = {
+    "files and merging": {
+        "includes_exist": "an include listed in protocol.yaml that is not on disk",
+        "no_duplicate_keys_across_files": "a key defined twice, silently overriding",
+        "derived_enums_not_hand_defined": "an enum both derived and written out",
+    },
+    "fields": {
+        "field_has_name_and_type": "a field missing either",
+        "field_keys_known": "`enumm:` instead of `enum:`, which would be ignored in silence",
+        "field_types_known": "a width that does not exist",
+        "struct_fields_name_a_struct": "type: struct with no struct named",
+        "references_resolve": "an enum, bitmask or struct name that does not exist",
+        "reference_widths_match": "a u16 field carrying a u8 enum, or the reverse",
+        "count_field_exists": "a variable-length field whose count is not a sibling",
+        "variable_field_is_last": "nothing can follow one, its end is unknown",
+    },
+    "messages": {
+        "unique_message_ids": "two messages sharing an id",
+        "ids_within_group_range": "an id outside its group's reserved range",
+        "async_bit_matches_group": "bit 7 disagreeing with `group: async`",
+        "command_declares_request": "a command with no request, so the host cannot build it",
+        "response_starts_with_status": "a command whose failure mode is unreadable",
+        "async_has_no_request": "an event modelled as if it were a command",
+        "repeated_structs_fixed_size": "variable-length records in a DMA ring buffer",
+    },
+    "values": {
+        "enum_values_unique_and_in_range": "two labels sharing a value, or one too wide",
+        "bitmask_bits_unique_and_in_range": "two flags sharing a bit, or one too wide",
+        "constants_fit_declared_width": "a sentinel that does not fit its type",
+    },
+    "buses": {
+        "bus_ids_unique": "two protocols claiming the same wire value",
+        "bus_pins_match_bus_create": "a pin role map that has drifted from the message",
+        "bus_faults_exist": "a supported_faults entry that is not a fault_type",
+        "bus_address_modes_exist": "an address_modes entry that is not an address_mode",
+        "bus_declares_address_modes": "a bus with no way to identify a device",
+        "address_modes_claimed_by_a_bus": "an address_mode value no bus accepts",
+    },
+}
+
+
+def print_rules() -> None:
+    total = sum(len(g) for g in RULES.values())
+    print(f"{total} checks run before anything is emitted.\n")
+    for group, rules in RULES.items():
+        print(f"{group}:")
+        width = max(len(n) for n in rules)
+        for name, why in rules.items():
+            print(f"  {name:<{width}}  {why}")
+        print()
 
 
 def validate(spec: dict[str, Any]) -> list[str]:
@@ -134,13 +224,45 @@ def validate(spec: dict[str, Any]) -> list[str]:
     structs = set(spec["structs"])
 
     def check_fields(fields: list[dict], where: str) -> None:
+        # Required keys first. Everything below dereferences name and type, so
+        # a field missing one must be reported and skipped rather than crash
+        # the run and hide whatever else is wrong.
+        for i, f in enumerate(fields):
+            for required in ("name", "type"):
+                if required not in f:
+                    errs.append(f"{where}: field {i} has no '{required}' key: {f}")
+        fields = [f for f in fields if "name" in f and "type" in f]
+
         siblings = {f["name"] for f in fields}
         for f in fields:
+            # A key codegen does not recognise would otherwise be ignored in
+            # silence: `enumm:` instead of `enum:` still emits a valid header,
+            # just without the enum. Reject it.
+            unknown = sorted(set(f) - FIELD_KEYS)
+            if unknown:
+                errs.append(
+                    f"{where}.{f.get('name', '?')}: unknown key(s) {unknown}. "
+                    f"Valid keys are {sorted(FIELD_KEYS)}"
+                )
             if f["type"] not in WIDTH and f["type"] != "struct":
                 errs.append(f"{where}.{f['name']}: unknown type '{f['type']}'")
+            if f["type"] == "struct" and "struct" not in f:
+                errs.append(f"{where}.{f['name']}: type is 'struct' but no struct name is given")
             for key, pool in (("enum", enums), ("bitmask", bitmasks), ("struct", structs)):
                 if key in f and f[key] not in pool:
                     errs.append(f"{where}.{f['name']}: no such {key} '{f[key]}'")
+
+            # `type` is the width on the wire; `enum`/`bitmask` say how to read
+            # those bytes. They must agree, or the field reserves a different
+            # number of bytes than the values it carries were defined for.
+            for key, table in (("enum", spec["enums"]), ("bitmask", spec["bitmasks"])):
+                if key in f and f[key] in table:
+                    declared = table[f[key]]["type"]
+                    if f["type"] != declared:
+                        errs.append(
+                            f"{where}.{f['name']}: field is {f['type']} but "
+                            f"{key} '{f[key]}' is {declared}"
+                        )
             if "count_field" in f and f["count_field"] not in siblings:
                 errs.append(
                     f"{where}.{f['name']}: count_field '{f['count_field']}' "
@@ -149,6 +271,12 @@ def validate(spec: dict[str, Any]) -> list[str]:
 
     for name, st in spec["structs"].items():
         check_fields(st["fields"], f"struct {name}")
+
+    # The frame header is described the same way as any other field list, so
+    # it gets the same checks. Nothing else reads it — the frame layout is
+    # emitted from the individual constants above it — which is exactly why a
+    # typo here would otherwise sit undetected.
+    check_fields(spec["frame"]["fields"], "frame")
 
     # --- buses -------------------------------------------------------------
     pin_fields = {
@@ -210,6 +338,13 @@ def validate(spec: dict[str, Any]) -> list[str]:
             if "request" in msg or "response" in msg:
                 errs.append(f"{name}: async message must not have request/response")
         else:
+            # A command with no `request` key generates no request type at
+            # all, so the host has no way to build the message. An empty
+            # `request: []` is the way to say "no parameters".
+            if "request" not in msg:
+                errs.append(
+                    f"{name}: command needs a request; use `request: []` if it takes no parameters"
+                )
             if "response" not in msg:
                 errs.append(f"{name}: command needs a response")
             elif msg["response"][0]["name"] != "status":
@@ -220,9 +355,13 @@ def validate(spec: dict[str, Any]) -> list[str]:
                 continue
             check_fields(msg[section], f"{name}.{section}")
             for f in msg[section]:
+                # f.get, not f[...]: a field with a missing or misspelled
+                # struct name has already been reported, and validation must
+                # finish reporting rather than crash on the next bad field.
                 if (
-                    f["type"] == "struct"
+                    f.get("type") == "struct"
                     and "count_field" in f
+                    and f.get("struct") in spec["structs"]
                     and fixed_size(spec["structs"][f["struct"]]["fields"], spec) is None
                 ):
                     errs.append(
@@ -338,11 +477,7 @@ def emit_c(spec: dict[str, Any]) -> str:
 
     o.append("/* ---- enums ---- */")
     for name, en in spec["enums"].items():
-        note = (
-            f"  /* synthesised from {en['synthesised_from']}/ */"
-            if "synthesised_from" in en
-            else ""
-        )
+        note = f"  /* derived from {en['derived_from']}/ */" if "derived_from" in en else ""
         o.append(f"typedef enum {{{note}")
         for label, entry in en["values"].items():
             o.append(f"    EMUWIRE_{name.upper()}_{label} = {entry['value']:#04x},")
@@ -358,13 +493,9 @@ def emit_c(spec: dict[str, Any]) -> str:
             )
         o.append("")
 
-    o.append("/* ---- message types ---- */")
-    o.append("typedef enum {")
-    for name, msg in spec["messages"].items():
-        o.append(f"    EMUWIRE_MSG_{name} = {msg['id']:#04x},")
-    o.append("} emuwire_msg_type_t;")
+    # Message ids are emitted by the enum loop above, from the derived
+    # msg_type enum, so they are not repeated here.
     o += [
-        "",
         "/* Bit 7 marks an asynchronous event: no lookup needed to route a frame. */",
         "#define EMUWIRE_MSG_IS_ASYNC(t) (((t) & 0x80u) != 0u)",
         "",
@@ -710,13 +841,26 @@ def emit_py(spec: dict[str, Any]) -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
+    # Raw, so the usage examples in the module docstring keep their line breaks
+    # instead of being reflowed into one paragraph.
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument(
         "--check",
         action="store_true",
         help="exit non-zero if the committed output is stale (used by CI)",
     )
+    ap.add_argument(
+        "--rules",
+        action="store_true",
+        help="list the checks run against the spec, and what each one catches",
+    )
     args = ap.parse_args()
+
+    if args.rules:
+        print_rules()
+        return 0
 
     spec = load()
     errs = validate(spec)
