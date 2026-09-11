@@ -70,6 +70,7 @@ A Raspberry Pi Pico 2 (RP2350A, ~€5), pull-up resistors, and jumper wires. No 
 | [RP2350 / Pico 2 architecture](docs/rp2350.md) | The chip, and the PIO constraints that shape the design |
 | [The toolchain explained](docs/toolchain.md) | What each tool does and why it's in the chain |
 | [The wire protocol](docs/protocol.md) | Frame format, message flow, and the error model |
+| [Continuous integration](docs/ci.md) | What CI checks, and how to run the same checks locally |
 
 You don't need a Pico to contribute. Most of the code — the host SDK, the wire protocol, manifests, even PIO programs and their instruction budgets — is testable without one.
 
