@@ -66,25 +66,36 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Detect SDK package
-        id: sdk
+      # Gate on whether there are tests, not on whether the SDK is a package.
+      # The suite runs with nothing installed — conftest puts sdk/ and
+      # protocol/ on the path itself — so requiring a pyproject.toml here
+      # would skip a working suite until packaging lands.
+      - name: Detect tests
+        id: tests
         run: |
-          if [ -f sdk/pyproject.toml ]; then
+          if find sdk/tests -name 'test_*.py' 2>/dev/null | grep -q .; then
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=SDK tests skipped::sdk/pyproject.toml does not exist yet."
+            echo "::notice title=No unit tests found::sdk/tests holds no test_*.py yet."
           fi
 
-      - name: Install SDK
-        if: steps.sdk.outputs.present == 'true'
+      - name: Install test dependencies
+        if: steps.tests.outputs.present == 'true'
         run: |
           pip install --upgrade pip
-          pip install -e "sdk/[dev]" || pip install -e sdk/ pytest
+          # pyyaml is not optional: conftest loads the protocol spec through
+          # codegen, so the tests are checked against their real source.
+          pip install --upgrade pytest pyyaml
+          # Once the SDK is a package, install it too, so the tests exercise
+          # the same import path users get rather than only the path hack.
+          if [ -f sdk/pyproject.toml ]; then
+            pip install -e "sdk/[dev]" || pip install -e sdk/
+          fi
 
       # Unit tests must pass with no board attached. The hardware-dependent
       # suite under tests/ is deliberately not run here — it belongs on a
       # self-hosted runner with real boards.
       - name: pytest (no hardware)
-        if: steps.sdk.outputs.present == 'true'
-        run: pytest sdk/tests -q
+        if: steps.tests.outputs.present == 'true'
+        run: python -m pytest sdk/tests -q

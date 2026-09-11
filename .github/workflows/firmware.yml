@@ -150,8 +150,27 @@ jobs:
           BASE="https://github.com/raspberrypi/pico-sdk-tools/releases/download/$PICO_TOOLS_TAG"
           mkdir -p /tmp/pioasm
           curl -fL --retry 3 "$BASE/pico-sdk-tools-$PICO_SDK_VERSION-x86_64-lin.tar.gz" | tar -xz -C /tmp/pioasm
+
+          # pioasm exits non-zero on a program over 32 instructions, and
+          # set -e above turns that into a failed job, so the per-program
+          # limit enforces itself. What it cannot see is co-residency: two
+          # 20-instruction programs each assemble, and still cannot share a
+          # block. The total below is that early warning.
+          total=0
           for f in "${files[@]}"; do
-            echo "=== $f ==="
             /tmp/pioasm/pioasm/pioasm -o c-sdk "$f" /tmp/out.h
-            grep -E '_wrap(_target)? ' /tmp/out.h || true
+            while read -r len; do
+              name=$(basename "$f")
+              echo "  $name  $len/32"
+              total=$((total + len))
+            done < <(grep -oE '\.length = [0-9]+' /tmp/out.h | grep -oE '[0-9]+')
           done
+
+          echo "  ----"
+          echo "  total across all programs: $total"
+          if [ "$total" -gt 32 ]; then
+            echo "::notice title=PIO programs no longer fit one block::$total instructions total. \
+          They still assemble, but no single PIO block can hold them all — \
+          bus allocation has to spread them, and a block can only run the \
+          programs loaded into it."
+          fi
