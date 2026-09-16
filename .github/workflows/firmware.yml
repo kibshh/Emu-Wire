@@ -40,8 +40,10 @@ jobs:
             echo "::notice title=Firmware build skipped::firmware/CMakeLists.txt does not exist yet. This job will build for real once the firmware skeleton lands."
           fi
 
+      # Unconditional from here down: the bench harnesses under tests/ are
+      # built with the same toolchain whether or not the firmware project
+      # exists yet, so the cache and the environment are always needed.
       - name: Cache toolchain and SDK
-        if: steps.fw.outputs.present == 'true'
         id: cache
         uses: actions/cache@v4
         with:
@@ -49,7 +51,7 @@ jobs:
           key: pico-${{ runner.os }}-gcc${{ env.ARM_GCC_VERSION }}-sdk${{ env.PICO_SDK_VERSION }}
 
       - name: Install Arm toolchain, SDK and tools
-        if: steps.fw.outputs.present == 'true' && steps.cache.outputs.cache-hit != 'true'
+        if: steps.cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           ROOT="$HOME/.pico-sdk"
@@ -77,7 +79,6 @@ jobs:
             | tar -xz -C "$ROOT/picotool/$PICO_SDK_VERSION"
 
       - name: Set up environment
-        if: steps.fw.outputs.present == 'true'
         run: |
           ROOT="$HOME/.pico-sdk"
           echo "PICO_SDK_PATH=$ROOT/sdk" >> "$GITHUB_ENV"
@@ -86,7 +87,6 @@ jobs:
           echo "$ROOT/picotool/$PICO_SDK_VERSION/picotool" >> "$GITHUB_PATH"
 
       - name: Install build tools
-        if: steps.fw.outputs.present == 'true'
         run: sudo apt-get update && sudo apt-get install -y cmake ninja-build
 
       - name: Configure
@@ -127,6 +127,63 @@ jobs:
         with:
           name: emuwire-uf2-${{ github.sha }}
           path: firmware/build/**/*.uf2
+          if-no-files-found: error
+
+      # The bench harnesses compile real firmware sources from where they live
+      # — tests/slave builds firmware/src/bus/i2c_bus.c and assembles
+      # firmware/pio/i2c_slave.pio. Until the firmware project exists, this is
+      # the only job that compiles any of that C, so a broken IRQ handler is
+      # caught here rather than at the bench.
+      - name: Build the bench harnesses
+        run: |
+          set -euo pipefail
+          built=0
+          for dir in tests/rig tests/slave; do
+            if [ ! -f "$dir/CMakeLists.txt" ]; then
+              echo "::notice title=Harness skipped::$dir has no CMakeLists.txt."
+              continue
+            fi
+            echo "::group::$dir"
+            cmake -S "$dir" -B "$dir/build" -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DPICO_BOARD=pico2 -DPICO_PLATFORM=rp2350 \
+              -Dpioasm_DIR="$HOME/.pico-sdk/tools/$PICO_SDK_VERSION/pioasm" \
+              -Dpicotool_DIR="$HOME/.pico-sdk/picotool/$PICO_SDK_VERSION/picotool"
+            cmake --build "$dir/build"
+            echo "::endgroup::"
+            built=$((built + 1))
+          done
+          if [ "$built" -eq 0 ]; then
+            echo "::error title=No harness built::Neither tests/rig nor tests/slave could be built."
+            exit 1
+          fi
+
+      # Same trap as the firmware image: an RP2040 build succeeds silently and
+      # produces a UF2 that will not run on a Pico 2.
+      - name: Verify the harness UF2s target RP2350
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          images=(tests/*/build/*.uf2)
+          if [ ${#images[@]} -eq 0 ]; then
+            echo "::error title=No harness UF2::The harnesses built but emitted no .uf2."
+            exit 1
+          fi
+          for uf2 in "${images[@]}"; do
+            picotool info -a "$uf2" | grep -q 'rp2350-arm-s' || {
+              echo "::error title=Wrong target::$uf2 is not an RP2350 image."
+              exit 1
+            }
+            echo "  $uf2  rp2350-arm-s"
+          done
+
+      # Downloadable from the run summary, so the bench machine can flash a
+      # tested build without compiling anything.
+      - name: Upload harness UF2s
+        uses: actions/upload-artifact@v4
+        with:
+          name: emuwire-bench-harnesses-${{ github.sha }}
+          path: tests/*/build/*.uf2
           if-no-files-found: error
 
   pio-budget:
