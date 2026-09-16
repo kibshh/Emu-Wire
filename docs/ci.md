@@ -6,7 +6,7 @@ Three workflows, six jobs. They run on every push to `main` and on every pull re
 |---|---|---|
 | `protocol` | `drift` | The generated files still match the spec |
 | | `generated-code` | The generated header compiles and the module imports |
-| `firmware` | `build` | The firmware builds and targets the right chip |
+| `firmware` | `build` | The firmware and the bench harnesses build, and target the right chip |
 | | `pio-budget` | PIO programs fit the 32-instruction limit |
 | `python` | `lint` | ruff, ruff format, mypy |
 | | `test` | The unit suite, on Python 3.9 and 3.13 |
@@ -32,6 +32,8 @@ picotool info -a build/*.uf2   →   family must be rp2350-arm-s
 ```
 
 An RP2040 build compiles, links, and produces a perfectly valid UF2 that simply will not run on a Pico 2. Asserting the family id catches that in CI instead of at the bench. The UF2 is uploaded as a run artefact, which is useful when you build on one machine and flash on another.
+
+The same job then builds the **bench harnesses** under `tests/`, with the same toolchain, and checks their UF2s the same way. They are not throwaway test code: they compile firmware sources from where those live, so `tests/slave` builds `firmware/src/bus/i2c_bus.c` and assembles `firmware/pio/i2c_slave.pio`. Until the firmware project exists, this is the only job that compiles any firmware C at all. Their UF2s are uploaded too, so the bench machine can flash a build it did not compile.
 
 **`pio-budget`** assembles every `.pio` with host `pioasm` and reports program lengths. PIO instruction memory is 32 instructions per block, shared by that block's four state machines, and it is the tightest constraint in the firmware. `pioasm` runs on the host, so this is enforceable with no hardware attached.
 
