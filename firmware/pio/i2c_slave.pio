@@ -1,10 +1,16 @@
 ;
-; I2C slave — first bring-up version.
+; I2C slave — clock-stretch ACK handshake.
 ;
-; Single fixed address, 400 kHz, one-byte reads. This is the narrowest thing
-; that proves the approach works on real silicon; the clock-stretch ACK
-; handshake, multi-address matching and the register model come next and are
-; what the instruction budget is being saved for.
+; The state machine shifts in the address byte, pulls SCL low to stretch the
+; clock, raises an IRQ and blocks. The CPU decides ACK or NACK and pushes the
+; answer back. Only then does the program release SCL and let the master take
+; its ninth clock.
+;
+; This is the load-bearing trick of the whole product. Without it the ACK
+; decision has to fit inside one SCL period — about 1 us at Fast-mode Plus —
+; which is not enough for an address lookup plus anything else. Stretching
+; turns a hard real-time deadline into a soft one, and real I2C slaves stretch
+; under load, so the bus sees nothing unusual.
 ;
 ; ---------------------------------------------------------------------------
 ; Open drain
@@ -13,65 +19,91 @@
 ; only ever pulls low. So the output registers are loaded with 0 once at init
 ; and the program manipulates PIN DIRECTIONS:
 ;
-;   set pindirs, 1   pin becomes an output driving the stored 0  -> line LOW
-;   set pindirs, 0   pin becomes an input                        -> line HIGH
+;   pindir 1   pin becomes an output driving the stored 0  -> line LOW
+;   pindir 0   pin becomes an input                        -> line HIGH
 ;
 ; Driving a value instead of a direction is how you get two devices fighting
 ; over a line, and it does not always show up until a second device is added.
 ;
 ; ---------------------------------------------------------------------------
-; Pin mapping
+; Pin mapping — one pin per mechanism
 ; ---------------------------------------------------------------------------
-; IN and SET share a base, so one pair of consecutive GPIOs serves both:
+; IN, SET and OUT share a base:
 ;
 ;   base + 0   SDA
 ;   base + 1   SCL
 ;
-; SET covers both pins (set_count = 2) even though this version only ever
-; drives SDA. SCL control is what clock stretching needs, and reserving the
-; bit now means the pin configuration does not change under it later.
+;   SET / OUT   write SDA only (count = 1): ACK, and the data bits.
+;   side-set    writes SCL only: "side 1" holds it low, "side 0" releases it.
+;   IN          samples SDA.
+;   JMP PIN     is SCL, for the START check.
 ;
-;   set pindirs, 0b00    release both
-;   set pindirs, 0b01    SDA low   (ACK, or a 0 data bit)
-;   set pindirs, 0b10    SCL low   (clock stretch — not used yet)
+; Splitting them this way means the stretch costs no instruction of its own:
+; side-set rides along with whatever instruction is already executing. It also
+; means SDA and SCL can never be written by the same instruction, so an ACK
+; can never accidentally release the clock.
 ;
-; JMP PIN is SCL. A .pio file cannot choose it, so it is set in C, in
-; i2c_slave_program_init() below.
+; A .pio file cannot choose the SET/OUT counts, the side-set pin or the JMP
+; pin. They are set in C, in i2c_slave_program_init() below.
+;
+; ---------------------------------------------------------------------------
+; The handshake, step by step
+; ---------------------------------------------------------------------------
+;   1. Eight address bits are shifted in and autopushed to the RX FIFO.
+;   2. On the falling edge of the eighth clock, side-set pulls SCL low. The
+;      master is now held. It cannot start the ninth clock.
+;   3. IRQ 0 (relative to this state machine) tells the CPU an address is
+;      waiting.
+;   4. PULL blocks. The state machine does nothing at all until the CPU
+;      answers, however long that takes.
+;   5. The answer's top bit: 1 = ACK, 0 = NACK.
+;        NACK -> jump to idle, which releases both lines. The master's ninth
+;                clock then reads SDA high, which is a NACK.
+;        ACK  -> drive SDA low, settle, then release SCL. The master's ninth
+;                clock reads SDA low.
+;   6. On ACK, a second word from the FIFO is the byte to send.
 ;
 ; ---------------------------------------------------------------------------
 ; What this version does NOT do
 ; ---------------------------------------------------------------------------
-; * It ACKs every address. The address byte is pushed to the RX FIFO for the
-;   CPU to read, but the ACK is unconditional, so the state machine answers
-;   for any device on the bus. Deciding whether to ACK is the whole point of
-;   the stretch handshake and comes next.
-; * It does not detect STOP or repeated START. A transaction that ends early
-;   leaves the program waiting mid-byte until the next START re-syncs it.
-; * It handles reads only. A master write is shifted in as if it were an
-;   address and then ignored.
+; * No write path. The address's R/W bit is passed to the CPU, but the program
+;   always continues into the data phase, so the CPU must NACK writes until
+;   task 16 adds the other branch.
+; * No STOP or repeated-START detection during a transaction. Both are only
+;   noticed by the idle loop, once the state machine gets back to it.
+; * One byte per read. A master that keeps clocking reads 0xFF after the first
+;   byte.
+; * A master that walks away after the ACK leaves SDA held low, because the
+;   first data bit is placed before the clock that would carry it. STOP
+;   detection is what fixes that.
 ;
-; None of these are oversights; they are the next four tasks. This one exists
-; to prove that a PIO state machine can hold a real 400 kHz bus at all.
+; None of these are oversights; they are the next tasks.
 ;
 
 .program i2c_slave
+.side_set 1 opt pindirs         ; side-set is SCL's direction: 1 = hold low
 
-; Pin offsets from the IN/SET base.
+; Pin offsets from the IN/SET/OUT base.
 .define PIN_SDA 0
 .define PIN_SCL 1
 
-; Pin direction patterns, written by SET PINDIRS with set_count = 2.
-.define RELEASE_BOTH 0b00
-.define DRIVE_SDA    0b01
+; SET/OUT write SDA only, so the patterns are one bit wide.
+.define RELEASE_SDA 0
+.define DRIVE_SDA   1
+
+; How long SDA is given to settle before SCL is released, in state-machine
+; cycles. The machine runs at 64 cycles per SCL period, so this is about an
+; eighth of a bit time — far more than the 100 ns the spec asks for.
+.define ACK_SETUP 7
 
 .wrap_target
 idle:
-    set pindirs, RELEASE_BOTH   ; never hold the bus across a restart
+    set pindirs, RELEASE_SDA side 0 ; release both lines: also the NACK answer
 wait_start:
     wait 1 pin PIN_SDA
-    wait 0 pin PIN_SDA          ; SDA falls...
-    jmp pin got_start           ; ...and SCL is still high: START (jmp pin = SCL)
-    jmp wait_start              ; SCL low: an ordinary data bit, keep looking
+    wait 0 pin PIN_SDA              ; SDA falls...
+    jmp pin got_start               ; ...and SCL is still high: START
+    jmp wait_start                  ; SCL low: an ordinary data bit, keep looking
 got_start:
 
 ; --- address phase -----------------------------------------------------
@@ -82,18 +114,27 @@ got_start:
 addr_bit:
     wait 0 pin PIN_SCL
     wait 1 pin PIN_SCL
-    in pins, 1                  ; autopush delivers the byte after 8 bits
+    in pins, 1                      ; autopush delivers the byte after 8 bits
     jmp x-- addr_bit
 
+; --- stretch, and ask the CPU ------------------------------------------
+; The stretch starts on the falling edge of the eighth clock, not earlier:
+; pulling SCL low while the master still holds it high would cut its high
+; period short.
+    wait 0 pin PIN_SCL
+    irq nowait 0 rel         side 1 ; hold SCL low; address is in the RX FIFO
+    pull block                      ; the CPU's answer — blocks for as long as it takes
+    out x, 1                        ; top bit: 1 = ACK, 0 = NACK
+    jmp !x, idle                    ; NACK: idle releases SCL, master reads SDA high
+
 ; --- acknowledge -------------------------------------------------------
-; SDA is driven low for the whole of the ninth clock. It is asserted while
-; SCL is low and released only after SCL falls again, which is what gives the
-; master valid setup and hold either side of its sample.
+; SDA is driven low for the whole of the ninth clock: asserted before SCL is
+; released, and released only after SCL falls again. That gives the master
+; valid setup and hold either side of its sample.
+    set pindirs, DRIVE_SDA [ACK_SETUP]
+    wait 1 pin PIN_SCL       side 0 ; release SCL; the master takes its ninth clock
     wait 0 pin PIN_SCL
-    set pindirs, DRIVE_SDA
-    wait 1 pin PIN_SCL
-    wait 0 pin PIN_SCL
-    set pindirs, RELEASE_BOTH
+    set pindirs, RELEASE_SDA        ; release SDA before the data phase
 
 ; --- data phase, slave transmitting ------------------------------------
 ; One byte out, MSB first. OUT writes straight to PINDIRS, so the CPU must
@@ -102,9 +143,10 @@ addr_bit:
 ; out of a loop that runs eight times per byte.
 ;
 ; Each bit is placed while SCL is low and held across the high period.
+    pull block                      ; the byte, pushed with the ACK
     set y, 7
 data_bit:
-    out pindirs, 1              ; autopull refills the OSR
+    out pindirs, 1
     wait 1 pin PIN_SCL
     wait 0 pin PIN_SCL
     jmp y-- data_bit
@@ -112,7 +154,7 @@ data_bit:
 ; --- master's acknowledge ----------------------------------------------
 ; Release SDA so the master can answer. Its ACK or NACK is not inspected
 ; here; acting on a NACK needs STOP detection, which this version lacks.
-    set pindirs, RELEASE_BOTH
+    set pindirs, RELEASE_SDA
     wait 1 pin PIN_SCL
     wait 0 pin PIN_SCL
 .wrap
@@ -126,6 +168,10 @@ data_bit:
  *   pin_sda    the lower of the pair; SCL must be pin_sda + 1
  *   bus_hz     the bus speed the master will drive, e.g. 400000
  *
+ * The state machine is left STOPPED. Start it only once something is ready to
+ * answer the handshake IRQ — a state machine that stretches with nobody
+ * listening holds the bus down for good.
+ *
  * The clock divider sets how finely the program can resolve an edge, not the
  * bus speed — the master owns the clock. Running the state machine much
  * faster than the bus keeps the sampling point well inside the data window.
@@ -136,16 +182,19 @@ static inline void i2c_slave_program_init(PIO pio, uint sm, uint offset, uint pi
 
     pio_sm_config c = i2c_slave_program_get_default_config(offset);
 
-    // IN and SET share the base, so PIN_SDA/PIN_SCL mean the same in both.
+    // SET and OUT reach SDA only. SCL is side-set's, and nothing else writes
+    // it, so releasing the clock is always deliberate.
     sm_config_set_in_pins(&c, pin_sda);
-    sm_config_set_set_pins(&c, pin_sda, 2);
-    sm_config_set_out_pins(&c, pin_sda, 2);
+    sm_config_set_set_pins(&c, pin_sda, 1);
+    sm_config_set_out_pins(&c, pin_sda, 1);
+    sm_config_set_sideset_pins(&c, pin_scl);
     sm_config_set_jmp_pin(&c, pin_scl);
 
-    // MSB first on the wire, both directions. Thresholds of 8 give one byte
-    // per push and per pull, so the program needs no explicit PUSH or PULL.
-    sm_config_set_in_shift(&c, false, true, 8);   // shift left, autopush at 8
-    sm_config_set_out_shift(&c, false, true, 8);  // shift left, autopull at 8
+    // IN: MSB first, autopush at 8, so the address byte arrives on its own.
+    // OUT: no autopull. Each phase pulls its own word — a decision, then a
+    // byte — and a PULL overwrites whatever the previous phase left behind.
+    sm_config_set_in_shift(&c, false, true, 8);    // shift left, autopush at 8
+    sm_config_set_out_shift(&c, false, false, 32); // shift left, no autopull
 
     // Oversample the bus heavily. At 400 kHz this is 32 state-machine cycles
     // per SCL half-period, which is ample for WAIT to catch an edge.
@@ -170,13 +219,21 @@ static inline void i2c_slave_program_init(PIO pio, uint sm, uint offset, uint pi
     gpio_disable_pulls(pin_scl);
 
     pio_sm_init(pio, sm, offset, &c);
-    pio_sm_set_enabled(pio, sm, true);
 }
+
+/* The answer to the handshake. OUT X takes the top bit, so the flag lives in
+ * bit 31. */
+#define I2C_SLAVE_ACK  0x80000000u
+#define I2C_SLAVE_NACK 0x00000000u
 
 /* The data phase writes OSR bits straight to PINDIRS, where 1 means "pull
  * low". Invert here so the caller passes the byte it actually wants on the
- * wire. */
+ * wire.
+ *
+ * Non-blocking on purpose: this is called from the IRQ handler, where the FIFO
+ * always has room, and blocking in an IRQ with the bus stretched would be the
+ * worst possible place to wait. */
 static inline void i2c_slave_prepare_byte(PIO pio, uint sm, uint8_t value) {
-    pio_sm_put_blocking(pio, sm, (uint32_t)((uint8_t)~value) << 24);
+    pio_sm_put(pio, sm, (uint32_t)((uint8_t)~value) << 24);
 }
 %}

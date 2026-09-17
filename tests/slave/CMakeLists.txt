@@ -19,7 +19,15 @@ set(CMAKE_CXX_STANDARD 17)
 
 pico_sdk_init()
 
-add_executable(i2c_slave_bringup main.c)
+# The CPU half of the handshake is firmware source, not harness source. It is
+# compiled from where it lives, so this harness tests the real file that the
+# firmware project will pick up at task 25.
+add_executable(i2c_slave_bringup
+    main.c
+    ${CMAKE_CURRENT_LIST_DIR}/../../firmware/src/bus/i2c_bus.c)
+
+target_include_directories(i2c_slave_bringup PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/../../firmware/src)
 
 target_compile_options(i2c_slave_bringup PRIVATE -Wall -Wextra -Werror)
 
@@ -29,7 +37,7 @@ target_compile_options(i2c_slave_bringup PRIVATE -Wall -Wextra -Werror)
 pico_generate_pio_header(i2c_slave_bringup
     ${CMAKE_CURRENT_LIST_DIR}/../../firmware/pio/i2c_slave.pio)
 
-target_link_libraries(i2c_slave_bringup pico_stdlib hardware_pio)
+target_link_libraries(i2c_slave_bringup pico_stdlib hardware_pio pico_multicore)
 
 pico_enable_stdio_usb(i2c_slave_bringup 1)
 pico_enable_stdio_uart(i2c_slave_bringup 0)
