@@ -1,16 +1,19 @@
 ;
-; I2C slave — clock-stretch ACK handshake.
+; I2C slave — one handshake per byte.
 ;
-; The state machine shifts in the address byte, pulls SCL low to stretch the
-; clock, raises an IRQ and blocks. The CPU decides ACK or NACK and pushes the
-; answer back. Only then does the program release SCL and let the master take
-; its ninth clock.
+; The state machine is the bit engine: it shifts bytes in and out, and holds
+; the bus still while the CPU decides what each one means. After every byte it
+; pulls SCL low, raises an IRQ and blocks until the CPU answers.
 ;
-; This is the load-bearing trick of the whole product. Without it the ACK
-; decision has to fit inside one SCL period — about 1 us at Fast-mode Plus —
-; which is not enough for an address lookup plus anything else. Stretching
+; That stretch is the load-bearing trick of the whole product. Without it the
+; ACK decision has to fit inside one SCL period — about 1 us at Fast-mode Plus
+; — which is not enough for an address lookup plus anything else. Stretching
 ; turns a hard real-time deadline into a soft one, and real I2C slaves stretch
 ; under load, so the bus sees nothing unusual.
+;
+; Because the CPU is asked once per byte, nearly all the behaviour lives
+; there: which addresses answer, whether a write is taken, which register a
+; read returns. The program only has to keep time.
 ;
 ; ---------------------------------------------------------------------------
 ; Open drain
@@ -33,51 +36,46 @@
 ;   base + 0   SDA
 ;   base + 1   SCL
 ;
-;   SET / OUT   write SDA only (count = 1): ACK, and the data bits.
+;   SET / OUT   write SDA only (count = 1): the ACK, and the data bits.
 ;   side-set    writes SCL only: "side 1" holds it low, "side 0" releases it.
-;   IN          samples SDA.
-;   JMP PIN     is SCL, for the START check.
+;   IN          samples SDA, masked to one pin so that MOV X, PINS reads SDA
+;               alone — that is what the reframe watch compares.
+;   JMP PIN     is SCL: "is the clock still high?"
 ;
 ; Splitting them this way means the stretch costs no instruction of its own:
 ; side-set rides along with whatever instruction is already executing. It also
 ; means SDA and SCL can never be written by the same instruction, so an ACK
 ; can never accidentally release the clock.
 ;
-; A .pio file cannot choose the SET/OUT counts, the side-set pin or the JMP
-; pin. They are set in C, in i2c_slave_program_init() below.
+; A .pio file cannot choose the pin counts, the side-set pin or the JMP pin.
+; They are set in C, in i2c_slave_program_init() below.
 ;
 ; ---------------------------------------------------------------------------
-; The handshake, step by step
+; One byte, step by step
 ; ---------------------------------------------------------------------------
-;   1. Eight address bits are shifted in and autopushed to the RX FIFO.
-;   2. On the falling edge of the eighth clock, side-set pulls SCL low. The
-;      master is now held. It cannot start the ninth clock.
-;   3. IRQ 0 (relative to this state machine) tells the CPU an address is
-;      waiting.
-;   4. PULL blocks. The state machine does nothing at all until the CPU
+;   1. Idle watches for a START: SDA falling while SCL is high.
+;   2. Eight bits are shifted in and autopushed to the RX FIFO.
+;   3. On the falling edge of the eighth clock, side-set pulls SCL low. The
+;      master is now held; it cannot start the ninth clock.
+;   4. IRQ 0 (relative to this state machine) wakes the CPU. IRQ 4 is set or
+;      clear beside it, saying whether that byte is data or an address.
+;   5. PULL blocks. The state machine does nothing at all until the CPU
 ;      answers, however long that takes.
-;   5. The answer's top bit: 1 = ACK, 0 = NACK.
-;        NACK -> jump to idle, which releases both lines. The master's ninth
-;                clock then reads SDA high, which is a NACK.
-;        ACK  -> drive SDA low, settle, then release SCL. The master's ninth
-;                clock reads SDA low.
-;   6. On ACK, a second word from the FIFO is the byte to send.
+;   6. The answer carries the ACK bit, where to continue — idle, rx_path or
+;      tx_path — and, for a read, the byte to send.
 ;
 ; ---------------------------------------------------------------------------
 ; What this version does NOT do
 ; ---------------------------------------------------------------------------
-; * No write path. The address's R/W bit is passed to the CPU, but the program
-;   always continues into the data phase, so the CPU must NACK writes until
-;   task 16 adds the other branch.
-; * No STOP or repeated-START detection during a transaction. Both are only
-;   noticed by the idle loop, once the state machine gets back to it.
-; * One byte per read. A master that keeps clocking reads 0xFF after the first
-;   byte.
-; * A master that walks away after the ACK leaves SDA held low, because the
-;   first data bit is placed before the clock that would carry it. STOP
-;   detection is what fixes that.
-;
-; None of these are oversights; they are the next tasks.
+; * One byte per read. A master that keeps clocking reads 0xFF after the
+;   first byte, because the program drops back to idle instead of asking for
+;   another. Burst reads need the master's ACK sampled on the ninth clock,
+;   and THE BLOCK IS FULL: 32 of 32 instructions. Adding that means taking
+;   something out, or splitting the read and write paths across two state
+;   machines sharing this program.
+; * Nothing enforces what a write means. The CPU takes or NACKs each byte.
+; * A master that walks away mid-read leaves SDA held low until the next
+;   transaction reframes the program.
 ;
 
 .program i2c_slave
@@ -96,20 +94,23 @@
 ; eighth of a bit time — far more than the 100 ns the spec asks for.
 .define ACK_SETUP 7
 
-.wrap_target
-idle:
-    set pindirs, RELEASE_SDA side 0 ; release both lines: also the NACK answer
-wait_start:
-    wait 1 pin PIN_SDA
-    wait 0 pin PIN_SDA              ; SDA falls...
-    jmp pin got_start               ; ...and SCL is still high: START
-    jmp wait_start                  ; SCL low: an ordinary data bit, keep looking
-got_start:
+; IRQ flag 4 (relative to this state machine, so 4..7) marks the byte in the
+; RX FIFO as DATA rather than an address. Flags 4-7 cannot reach the CPU as an
+; interrupt, which is exactly right: this is a label on the byte, read by the
+; handler that flag 0 already woke.
+.define MARK_DATA 4
 
 ; --- address phase -----------------------------------------------------
 ; Eight bits, MSB first, each sampled while SCL is high. Both edges must be
 ; waited on: WAIT 1 returns immediately if the line is already high, so
 ; without the falling-edge wait the loop would read the same bit eight times.
+;
+; Entered from three places: a START from idle, a repeated START spotted
+; mid-transaction, and a STOP — after a STOP the next falling edge of SCL can
+; only belong to the next transaction's first bit, so waiting for it is the
+; same as waiting for the START.
+got_start:
+    irq clear MARK_DATA rel     ; a new address: whatever came before is over
     set x, 7
 addr_bit:
     wait 0 pin PIN_SCL
@@ -118,45 +119,80 @@ addr_bit:
     jmp x-- addr_bit
 
 ; --- stretch, and ask the CPU ------------------------------------------
+; Shared by the address byte and every data byte the master writes. The CPU
+; answers all three questions at once, in one word:
+;
+;   bit 31      ACK: 1 drives SDA low, 0 leaves it high
+;   bits 30:26  where to go next: idle, rx_path or tx_path
+;   bits 25:18  the byte to send, already inverted (tx_path only)
+;
+; A NACK is just an answer whose ACK bit is 0 and whose continuation is idle,
+; so it needs no branch of its own.
+;
 ; The stretch starts on the falling edge of the eighth clock, not earlier:
 ; pulling SCL low while the master still holds it high would cut its high
 ; period short.
+handshake:
     wait 0 pin PIN_SCL
-    irq nowait 0 rel         side 1 ; hold SCL low; address is in the RX FIFO
-    pull block                      ; the CPU's answer — blocks for as long as it takes
-    out x, 1                        ; top bit: 1 = ACK, 0 = NACK
-    jmp !x, idle                    ; NACK: idle releases SCL, master reads SDA high
-
-; --- acknowledge -------------------------------------------------------
-; SDA is driven low for the whole of the ninth clock: asserted before SCL is
-; released, and released only after SCL falls again. That gives the master
-; valid setup and hold either side of its sample.
-    set pindirs, DRIVE_SDA [ACK_SETUP]
+    irq nowait 0 rel         side 1 ; hold SCL low; byte is in the RX FIFO
+    pull block                      ; the answer — blocks for as long as it takes
+    out pindirs, 1 [ACK_SETUP]      ; ACK or NACK, then let SDA settle
     wait 1 pin PIN_SCL       side 0 ; release SCL; the master takes its ninth clock
     wait 0 pin PIN_SCL
-    set pindirs, RELEASE_SDA        ; release SDA before the data phase
+    set pindirs, RELEASE_SDA        ; release SDA once the clock has fallen
+    out pc, 5                       ; go where the CPU said
 
-; --- data phase, slave transmitting ------------------------------------
-; One byte out, MSB first. OUT writes straight to PINDIRS, so the CPU must
-; supply the byte ALREADY INVERTED: a 0 bit has to become pindirs=1 to pull
-; the line low. Inverting on the CPU costs nothing and keeps an instruction
-; out of a loop that runs eight times per byte.
+; --- receiving, master writing -----------------------------------------
+; The first bit of a byte is the only place a START or STOP can appear, so it
+; is the only bit that needs watching. Sample SDA when SCL rises, then watch
+; it until SCL falls:
 ;
-; Each bit is placed while SCL is low and held across the high period.
-    pull block                      ; the byte, pushed with the ACK
+;   SDA steady           an ordinary data bit
+;   SDA fell   while high  repeated START — an address follows
+;   SDA rose   while high  STOP — the transaction is over
+;
+; Both of those mean the next byte is an address, and got_start handles
+; either. Nothing is shifted into the ISR until the bit is known to be real,
+; so a reframe never leaves half a byte behind.
+public rx_path:
+    wait 1 pin PIN_SCL
+    mov y, pins                     ; SDA at the rising edge (IN count masks it to one bit)
+rx_watch:
+    mov x, pins
+    jmp x!=y, got_start             ; SDA moved while SCL was high: START or STOP
+    jmp pin rx_watch                ; SCL still high: keep watching
+    in y, 1                         ; SCL fell with SDA steady: a real bit
+    set x, 6                        ; seven more, then the same handshake
+    irq nowait MARK_DATA rel        ; label the byte: data, not an address
+    jmp addr_bit
+
+; --- transmitting, master reading --------------------------------------
+; One byte out, MSB first, taken from the answer word the handshake already
+; pulled. OUT writes straight to PINDIRS, where 1 means "pull low", so the CPU
+; supplies the byte inverted — that keeps an instruction out of a loop that
+; runs eight times per byte.
+;
+; Each bit is placed while SCL is low and held across the high period. After
+; the eighth bit the program falls into idle, which releases SDA in time for
+; the master's own ACK.
+public tx_path:
     set y, 7
-data_bit:
+tx_bit:
     out pindirs, 1
     wait 1 pin PIN_SCL
     wait 0 pin PIN_SCL
-    jmp y-- data_bit
+    jmp y-- tx_bit
 
-; --- master's acknowledge ----------------------------------------------
-; Release SDA so the master can answer. Its ACK or NACK is not inspected
-; here; acting on a NACK needs STOP detection, which this version lacks.
-    set pindirs, RELEASE_SDA
-    wait 1 pin PIN_SCL
-    wait 0 pin PIN_SCL
+; --- idle ---------------------------------------------------------------
+; Also the answer to a NACK, and where the transmit path ends up. Releasing
+; both lines here means no failure leaves the bus held down.
+public idle:
+    set pindirs, RELEASE_SDA side 0
+.wrap_target
+wait_start:
+    wait 1 pin PIN_SDA
+    wait 0 pin PIN_SDA              ; SDA falls...
+    jmp pin got_start               ; ...and SCL is still high: START
 .wrap
 
 % c-sdk {
@@ -174,7 +210,8 @@ data_bit:
  *
  * The clock divider sets how finely the program can resolve an edge, not the
  * bus speed — the master owns the clock. Running the state machine much
- * faster than the bus keeps the sampling point well inside the data window.
+ * faster than the bus keeps the sampling point well inside the data window,
+ * and gives the reframe watch many looks at SDA per clock.
  */
 static inline void i2c_slave_program_init(PIO pio, uint sm, uint offset, uint pin_sda,
                                           uint bus_hz) {
@@ -190,9 +227,15 @@ static inline void i2c_slave_program_init(PIO pio, uint sm, uint offset, uint pi
     sm_config_set_sideset_pins(&c, pin_scl);
     sm_config_set_jmp_pin(&c, pin_scl);
 
-    // IN: MSB first, autopush at 8, so the address byte arrives on its own.
-    // OUT: no autopull. Each phase pulls its own word — a decision, then a
-    // byte — and a PULL overwrites whatever the previous phase left behind.
+    // One input pin, so MOV X, PINS reads SDA and nothing else. Without this
+    // the reframe watch would compare every GPIO on the chip, and a PWM
+    // output elsewhere on the board would look like a STOP.
+    sm_config_set_in_pin_count(&c, 1);
+
+    // IN: MSB first, autopush at 8, so a byte arrives on its own.
+    // OUT: no autopull. The answer word is pulled once and then read in
+    // pieces — ACK bit, continuation, byte — and autopull would refill it
+    // part-way through.
     sm_config_set_in_shift(&c, false, true, 8);    // shift left, autopush at 8
     sm_config_set_out_shift(&c, false, false, 32); // shift left, no autopull
 
@@ -218,22 +261,30 @@ static inline void i2c_slave_program_init(PIO pio, uint sm, uint offset, uint pi
     gpio_disable_pulls(pin_sda);
     gpio_disable_pulls(pin_scl);
 
-    pio_sm_init(pio, sm, offset, &c);
+    // Start at idle, not at the first instruction. The program is laid out
+    // with the bit loops first, and entering there would mean starting in the
+    // middle of a transaction that never began.
+    pio_sm_init(pio, sm, offset + i2c_slave_offset_idle, &c);
 }
 
-/* The answer to the handshake. OUT X takes the top bit, so the flag lives in
- * bit 31. */
-#define I2C_SLAVE_ACK  0x80000000u
-#define I2C_SLAVE_NACK 0x00000000u
+/* IRQ flag 4 + sm, set by the receive path and read by the handler: it says
+ * the byte waiting in the RX FIFO is data, not an address. Flags 4-7 cannot
+ * raise a system interrupt, which is what makes them safe to use as a label
+ * on a byte rather than an event of their own. */
+#define I2C_SLAVE_MARK_DATA 4u
 
-/* The data phase writes OSR bits straight to PINDIRS, where 1 means "pull
- * low". Invert here so the caller passes the byte it actually wants on the
- * wire.
+/* The answer to one handshake, in one word.
  *
- * Non-blocking on purpose: this is called from the IRQ handler, where the FIFO
- * always has room, and blocking in an IRQ with the bus stretched would be the
- * worst possible place to wait. */
-static inline void i2c_slave_prepare_byte(PIO pio, uint sm, uint8_t value) {
-    pio_sm_put(pio, sm, (uint32_t)((uint8_t)~value) << 24);
+ *   bit 31      ACK. 1 drives SDA low; 0 leaves it high, which is a NACK.
+ *   bits 30:26  where to continue: the program's idle, rx_path or tx_path,
+ *               each plus the offset the program was loaded at.
+ *   bits 25:18  the byte to send, inverted, because OUT writes PINDIRS where
+ *               1 means "pull low". Only tx_path reads it.
+ *
+ * A NACK is an answer like any other: ACK bit clear, continuation idle.
+ */
+static inline uint32_t i2c_slave_answer(bool ack, uint continue_at, uint8_t tx_byte) {
+    return ((uint32_t)(ack ? 1u : 0u) << 31) | ((uint32_t)(continue_at & 0x1fu) << 26) |
+           ((uint32_t)(uint8_t)~tx_byte << 18);
 }
 %}

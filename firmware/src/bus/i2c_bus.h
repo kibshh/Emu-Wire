@@ -1,11 +1,15 @@
 /*
- * I2C bus — the CPU half of the clock-stretch ACK handshake.
+ * I2C bus — the CPU half of the clock-stretch handshake.
  *
- * The PIO state machine (firmware/pio/i2c_slave.pio) shifts in an address
- * byte, holds SCL low and raises an IRQ. The handler here looks the address
- * up and pushes back ACK or NACK, which releases the clock. Everything in
- * this file that runs from the IRQ is on the critical path of a held bus: the
- * master is waiting, in real time, for it to return.
+ * The PIO state machine (firmware/pio/i2c_slave.pio) shifts one byte, holds
+ * SCL low and raises an IRQ. The handler here decides what the byte means and
+ * answers with one word: ACK or NACK, where the program continues, and, for a
+ * read, the byte to send. Releasing the clock is what that answer does.
+ *
+ * So the protocol lives here, not in the program: address matching, the
+ * register pointer, and which writes are accepted. Everything in this file
+ * that runs from the IRQ is on the critical path of a held bus — the master
+ * is waiting, in real time, for it to return.
  */
 #ifndef EMUWIRE_BUS_I2C_BUS_H
 #define EMUWIRE_BUS_I2C_BUS_H
@@ -29,9 +33,17 @@
 typedef struct {
     uint8_t addr;      /* 7-bit, without the R/W bit */
     uint8_t device_id;
-    /* The byte every read returns. A placeholder for the register model,
-     * which arrives in task 14 and replaces this field. */
-    uint8_t read_byte;
+
+    /* The register map, owned by the caller and never written here. The real
+     * device model — writable registers, auto-increment, per-register flags —
+     * arrives with the regmap; this is enough to answer a read. */
+    const uint8_t *regs;
+    uint16_t reg_count;
+
+    /* Where the next read starts. The master sets it by writing one byte
+     * after the address, which is how every register-addressed part works.
+     * Written by the IRQ handler. */
+    volatile uint8_t pointer;
 } i2c_device_t;
 
 typedef struct {
@@ -41,19 +53,31 @@ typedef struct {
     uint pin_sda;
     bool running;
 
+    /* Where the program continues after each answer. Absolute addresses, so
+     * the IRQ handler never has to add the load offset. */
+    uint pc_idle;
+    uint pc_rx;
+    uint pc_tx;
+
     i2c_device_t devices[I2C_BUS_MAX_DEVICES];
     uint8_t device_count;
     uint8_t index[I2C_BUS_ADDR_COUNT]; /* address -> slot, or I2C_BUS_NO_DEVICE */
+
+    /* The transaction in progress. Both are owned by the IRQ handler. */
+    volatile uint8_t active;     /* slot being addressed, or I2C_BUS_NO_DEVICE */
+    volatile uint8_t data_bytes; /* data bytes taken since the address */
 
     /* Written by the IRQ handler only, read by the other core. Each is a
      * single aligned word, so a reader never sees half a value, but a group
      * of them read together is not one instant. Diagnostics, not accounting. */
     volatile uint32_t acked;
-    volatile uint32_t nacked_unknown; /* no device at that address */
-    volatile uint32_t nacked_write;   /* no write path yet — see task 16 */
-    volatile uint32_t no_address;     /* handshake IRQ with an empty RX FIFO */
-    volatile uint32_t tx_blocked;     /* no room to answer: the bus will hang */
-    volatile uint8_t last_frame;      /* last address byte seen, R/W bit included */
+    volatile uint32_t pointer_writes;  /* register pointer accepted */
+    volatile uint32_t nacked_unknown;  /* no device at that address */
+    volatile uint32_t nacked_write;    /* a write byte with nowhere to go */
+    volatile uint32_t nacked_stray;    /* a data byte outside any transaction */
+    volatile uint32_t no_address;      /* handshake IRQ with an empty RX FIFO */
+    volatile uint32_t tx_blocked;      /* no room to answer: the bus will hang */
+    volatile uint8_t last_frame;       /* last address byte seen, R/W bit included */
 } i2c_bus_t;
 
 /* Claim a state machine and load the program. SDA and SCL must be
@@ -67,12 +91,13 @@ typedef struct {
  */
 emuwire_status_t i2c_bus_init(i2c_bus_t *bus, PIO pio, uint sm, uint pin_sda, uint bus_hz);
 
-/* Attach a device at a 7-bit address. Rejects reserved addresses and an
- * address that is already taken: two devices at one address is a wiring fault
- * that answers with the bitwise AND of both, which is never what a test
- * meant to set up. */
+/* Attach a device at a 7-bit address, backed by a register map the caller
+ * owns and keeps alive. Rejects reserved addresses and an address that is
+ * already taken: two devices at one address is a wiring fault that answers
+ * with the bitwise AND of both, which is never what a test meant to set up.
+ */
 emuwire_status_t i2c_bus_attach(i2c_bus_t *bus, uint8_t addr, uint8_t device_id,
-                                uint8_t read_byte);
+                                const uint8_t *regs, uint16_t reg_count);
 
 /* Install the handshake IRQ handler and start the state machine.
  *
