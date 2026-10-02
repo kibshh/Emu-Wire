@@ -126,7 +126,7 @@ sudo apt install -y build-essential cmake ninja-build git python3 python3-venv \
 Bench machines also want the logic-analyzer software:
 
 ```bash
-sudo apt install -y pulseview sigrok-cli
+sudo apt install -y pulseview sigrok-cli sigrok-firmware-fx2lafw picocom
 ```
 
 ### 2. Remove brltty

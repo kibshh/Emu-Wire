@@ -18,6 +18,7 @@ TOOLS_TAG='v2.3.0-1'
 GCC_VER='14.2.rel1'
 OPENOCD_VER='0.12.0+dev'
 ROOT="$HOME/.pico-sdk"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -30,6 +31,9 @@ say() { printf '\n\033[36m==> %s\033[0m\n' "$1"; }
 # picotool from source is possible. We still take the prebuilt binaries below
 # because they are version-matched to the SDK.
 # libusb + pkg-config are needed for picotool to talk to a board over USB.
+# sigrok-firmware-fx2lafw: the cheap FX2LP analyzer has no firmware of its
+# own, and sigrok uploads this on every plug-in. Without it the analyzer is
+# simply "not found". picocom is the serial terminal for both boards.
 say "apt packages"
 # Ubuntu's automatic updates hold the package lock for minutes at a time,
 # often right after boot. Wait for it instead of failing on the first line.
@@ -38,7 +42,8 @@ sudo apt-get "${APT_WAIT[@]}" update
 sudo apt-get "${APT_WAIT[@]}" install -y \
     build-essential cmake ninja-build git python3 python3-venv \
     libusb-1.0-0-dev pkg-config \
-    pulseview sigrok-cli
+    pulseview sigrok-cli sigrok-firmware-fx2lafw \
+    picocom
 
 # --- 2. brltty: the trap ----------------------------------------------------
 # Ubuntu's braille daemon claims /dev/ttyACM* devices. Your Pico enumerates,
@@ -123,28 +128,54 @@ fetch "openocd-$OPENOCD_VER-$LARCH-lin.tar.gz"    "$ROOT/openocd/$OPENOCD_VER"
 # --- 7. Environment ---------------------------------------------------------
 say 'environment'
 PROFILE="$HOME/.bashrc"
-MARK='# --- EmuWire pico-sdk ---'
-if ! grep -qF "$MARK" "$PROFILE"; then
-cat >> "$PROFILE" <<EOF
+BEGIN='# >>> EmuWire pico-sdk >>>'
+END='# <<< EmuWire pico-sdk <<<'
 
-$MARK
+# Rewrite the block on every run rather than skipping it when present, so a
+# re-run repairs whatever an older version of this script wrote. That
+# includes the first version's single-marker block, which baked a frozen
+# copy of PATH into .bashrc.
+sed -i "/^$BEGIN\$/,/^$END\$/d" "$PROFILE"
+sed -i '/^# --- EmuWire pico-sdk ---$/,+3d' "$PROFILE"
+
+# \$PATH is escaped so .bashrc gets the variable, not today's value of it.
+# Unescaped, every later change to PATH made above this block would be
+# silently overwritten each time a shell starts.
+cat >> "$PROFILE" <<EOF
+$BEGIN
 export PICO_SDK_PATH="$ROOT/sdk"
 export PICO_TOOLCHAIN_PATH="$GCC_DIR"
-export PATH="$PATH:$GCC_DIR/bin:$ROOT/tools/$SDK_VER/pioasm:$ROOT/picotool/$SDK_VER/picotool:$ROOT/openocd/$OPENOCD_VER"
+export PATH="\$PATH:$GCC_DIR/bin:$ROOT/tools/$SDK_VER/pioasm:$ROOT/picotool/$SDK_VER/picotool:$ROOT/openocd/$OPENOCD_VER"
+$END
 EOF
-fi
 
 cat <<EOF
 
-Done. Now: LOG OUT AND BACK IN — the dialout group needs a fresh session,
-a new terminal is not enough.
+Done. Now: LOG OUT AND BACK IN. The dialout group only applies to a new
+session; a new terminal is not enough.
 
-Then verify all four:
+Then check, no hardware needed:
 
-  1. cmake -S . -B build -G Ninja -DPICO_BOARD=pico2 -DPICO_PLATFORM=rp2350 \\
-       -Dpioasm_DIR="$ROOT/tools/$SDK_VER/pioasm" \\
-       -Dpicotool_DIR="$ROOT/picotool/$SDK_VER/picotool"
-  2. picotool info                       # a Pico, WITHOUT sudo
-  3. openocd -f interface/cmsis-dap.cfg -f target/rp2350.cfg
-  4. sigrok-cli --scan                   # finds the analyzer
+  groups                           # includes dialout
+  arm-none-eabi-gcc --version      # 14.2.1
+  picotool version                 # picotool v2.3.0
+  command -v pioasm                # a path under $ROOT
+
+A real build, from this repo:
+
+  cmake -S $REPO/tests/rig -B $REPO/tests/rig/build -G Ninja \\
+    -DPICO_BOARD=pico2 -DPICO_PLATFORM=rp2350 \\
+    -Dpioasm_DIR=$ROOT/tools/$SDK_VER/pioasm \\
+    -Dpicotool_DIR=$ROOT/picotool/$SDK_VER/picotool
+  cmake --build $REPO/tests/rig/build
+
+With hardware attached:
+
+  picotool info                    # a Pico held in BOOTSEL, WITHOUT sudo
+  sigrok-cli --scan                # the analyzer, listed as fx2lafw
+  openocd -s $ROOT/openocd/$OPENOCD_VER/scripts \\
+    -f interface/cmsis-dap.cfg -f target/rp2350.cfg      # via the Debug Probe
+
+OpenOCD needs -s: the prebuilt keeps its scripts next to the binary, where
+it does not look by default.
 EOF
