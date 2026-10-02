@@ -31,8 +31,11 @@ say() { printf '\n\033[36m==> %s\033[0m\n' "$1"; }
 # because they are version-matched to the SDK.
 # libusb + pkg-config are needed for picotool to talk to a board over USB.
 say "apt packages"
-sudo apt-get update
-sudo apt-get install -y \
+# Ubuntu's automatic updates hold the package lock for minutes at a time,
+# often right after boot. Wait for it instead of failing on the first line.
+APT_WAIT=(-o DPkg::Lock::Timeout=600)
+sudo apt-get "${APT_WAIT[@]}" update
+sudo apt-get "${APT_WAIT[@]}" install -y \
     build-essential cmake ninja-build git python3 python3-venv \
     libusb-1.0-0-dev pkg-config \
     pulseview sigrok-cli
@@ -42,7 +45,11 @@ sudo apt-get install -y \
 # then disappears a second later. This is the most common Ubuntu embedded-dev
 # trap and it looks exactly like faulty hardware or a bad cable.
 say 'removing brltty (it steals /dev/ttyACM*)'
-sudo apt-get remove -y brltty || true
+# Only skip the removal when brltty is not installed. "|| true" would also
+# swallow a failed removal, leaving the trap armed with no sign of it.
+if dpkg -s brltty >/dev/null 2>&1; then
+    sudo apt-get "${APT_WAIT[@]}" remove -y brltty
+fi
 
 # --- 3. Device permissions --------------------------------------------------
 # USB CDC *is* this product's transport, so serial access without sudo is not
