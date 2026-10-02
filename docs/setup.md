@@ -148,12 +148,12 @@ sudo usermod -aG dialout $USER
 Then install udev rules so `picotool`, OpenOCD and PulseView can reach devices as a normal user:
 
 ```bash
-sudo curl -fsSL -o /etc/udev/rules.d/99-picotool.rules \
-  https://raw.githubusercontent.com/raspberrypi/picotool/master/udev/99-picotool.rules
-sudo curl -fsSL -o /etc/udev/rules.d/60-libsigrok.rules \
-  https://raw.githubusercontent.com/sigrokproject/libsigrok/master/contrib/60-libsigrok.rules
+sudo curl -fsSL -o /etc/udev/rules.d/60-picotool.rules \
+  https://raw.githubusercontent.com/raspberrypi/picotool/2.3.0/udev/60-picotool.rules
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
+
+The analyzer needs no download: the `pulseview` package brings `libsigrok`, which installs its own udev rules.
 
 > **Log out and back in.** Group membership doesn't apply to a new terminal — it needs a new session. Skipping this is why "I added myself to dialout and it still says permission denied" happens.
 

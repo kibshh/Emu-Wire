@@ -57,14 +57,16 @@ fi
 say 'serial + udev permissions'
 sudo usermod -aG dialout "$USER"
 
-# picotool: lets BOOTSEL-mode boards be accessed without sudo.
-sudo curl -fsSL -o /etc/udev/rules.d/99-picotool.rules \
-    https://raw.githubusercontent.com/raspberrypi/picotool/master/udev/99-picotool.rules
+# picotool: lets BOOTSEL-mode boards be accessed without sudo. Taken from
+# the picotool tag that matches the SDK, not master: master renamed this file
+# once already (99- to 60-), and a moving branch is how that breaks a setup.
+sudo curl -fsSL -o /etc/udev/rules.d/60-picotool.rules \
+    "https://raw.githubusercontent.com/raspberrypi/picotool/$SDK_VER/udev/60-picotool.rules"
 
-# sigrok: same for the FX2LP logic analyzer clone. Without this PulseView
-# reports "no devices found" rather than a permission error.
-sudo curl -fsSL -o /etc/udev/rules.d/60-libsigrok.rules \
-    https://raw.githubusercontent.com/sigrokproject/libsigrok/master/contrib/60-libsigrok.rules
+# sigrok: nothing to download. The libsigrok package pulled in by pulseview
+# above installs its own rules into /lib/udev/rules.d, including the one that
+# gives the logged-in user the FX2LP analyzer. A second copy from upstream
+# master would only shadow the version the distro tested.
 
 sudo udevadm control --reload-rules && sudo udevadm trigger
 
