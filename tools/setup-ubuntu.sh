@@ -157,7 +157,10 @@ session; a new terminal is not enough.
 Then check, no hardware needed:
 
   groups                           # includes dialout
-  arm-none-eabi-gcc --version      # 14.2.1
+  $GCC_DIR/bin/arm-none-eabi-gcc --version   # 14.2.1
+                                   # (by full path: an older apt arm-none-eabi-gcc
+                                   #  may come first on PATH; builds use this one
+                                   #  anyway, via PICO_TOOLCHAIN_PATH)
   picotool version                 # picotool v2.3.0
   command -v pioasm                # a path under $ROOT
 
