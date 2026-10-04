@@ -39,8 +39,10 @@
 ;   SET / OUT   write SDA only (count = 1): the ACK, and the data bits.
 ;   side-set    writes SCL only: "side 1" holds it low, "side 0" releases it.
 ;   IN          samples SDA, masked to one pin so that MOV X, PINS reads SDA
-;               alone — that is what the reframe watch compares.
-;   JMP PIN     is SCL: "is the clock still high?"
+;               alone — that is what the reframe watch compares. The mask
+;               also applies to WAIT PIN, so SCL cannot be waited on that way.
+;   JMP PIN     is SCL: "is the clock still high?", and the pin every SCL
+;               WAIT uses (WAIT JMPPIN, which the mask does not touch).
 ;
 ; Splitting them this way means the stretch costs no instruction of its own:
 ; side-set rides along with whatever instruction is already executing. It also
@@ -79,11 +81,14 @@
 ;
 
 .program i2c_slave
+.pio_version 1                  ; RP2350: needed for WAIT JMPPIN
 .side_set 1 opt pindirs         ; side-set is SCL's direction: 1 = hold low
 
 ; Pin offsets from the IN/SET/OUT base.
 .define PIN_SDA 0
-.define PIN_SCL 1
+; There is deliberately no PIN_SCL. IN is masked to one pin, and the mask
+; applies to WAIT PIN too, so "wait 1 pin 1" would see SCL as 0 for ever.
+; Wait on SCL with WAIT JMPPIN instead: the JMP pin is SCL.
 
 ; SET/OUT write SDA only, so the patterns are one bit wide.
 .define RELEASE_SDA 0
@@ -113,8 +118,8 @@ got_start:
     irq clear MARK_DATA rel     ; a new address: whatever came before is over
     set x, 7
 addr_bit:
-    wait 0 pin PIN_SCL
-    wait 1 pin PIN_SCL
+    wait 0 jmppin
+    wait 1 jmppin
     in pins, 1                      ; autopush delivers the byte after 8 bits
     jmp x-- addr_bit
 
@@ -133,12 +138,12 @@ addr_bit:
 ; pulling SCL low while the master still holds it high would cut its high
 ; period short.
 handshake:
-    wait 0 pin PIN_SCL
+    wait 0 jmppin
     irq nowait 0 rel         side 1 ; hold SCL low; byte is in the RX FIFO
     pull block                      ; the answer — blocks for as long as it takes
     out pindirs, 1 [ACK_SETUP]      ; ACK or NACK, then let SDA settle
-    wait 1 pin PIN_SCL       side 0 ; release SCL; the master takes its ninth clock
-    wait 0 pin PIN_SCL
+    wait 1 jmppin       side 0 ; release SCL; the master takes its ninth clock
+    wait 0 jmppin
     set pindirs, RELEASE_SDA        ; release SDA once the clock has fallen
     out pc, 5                       ; go where the CPU said
 
@@ -155,7 +160,7 @@ handshake:
 ; either. Nothing is shifted into the ISR until the bit is known to be real,
 ; so a reframe never leaves half a byte behind.
 public rx_path:
-    wait 1 pin PIN_SCL
+    wait 1 jmppin
     mov y, pins                     ; SDA at the rising edge (IN count masks it to one bit)
 rx_watch:
     mov x, pins
@@ -179,8 +184,8 @@ public tx_path:
     set y, 7
 tx_bit:
     out pindirs, 1
-    wait 1 pin PIN_SCL
-    wait 0 pin PIN_SCL
+    wait 1 jmppin
+    wait 0 jmppin
     jmp y-- tx_bit
 
 ; --- idle ---------------------------------------------------------------
@@ -230,6 +235,10 @@ static inline void i2c_slave_program_init(PIO pio, uint sm, uint offset, uint pi
     // One input pin, so MOV X, PINS reads SDA and nothing else. Without this
     // the reframe watch would compare every GPIO on the chip, and a PWM
     // output elsewhere on the board would look like a STOP.
+    //
+    // The mask also applies to WAIT PIN, which is why the program waits on
+    // SCL through the JMP pin. Found on the bench: with WAIT PIN on SCL, the
+    // state machine saw a START and then waited for ever on the first clock.
     sm_config_set_in_pin_count(&c, 1);
 
     // IN: MSB first, autopush at 8, so a byte arrives on its own.
