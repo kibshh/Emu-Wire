@@ -78,8 +78,12 @@ static void __not_in_flash_func(i2c_bus_handshake_isr)(void) {
         return;
     }
 
-    /* Autopush moved 8 bits into a 32-bit word, so the byte is left-aligned. */
-    const uint8_t byte = (uint8_t)(pio_sm_get(pio, sm) >> 24);
+    /* IN shifts left: each new bit enters at bit 0 and pushes the older ones
+     * up. After eight, the byte is in bits 7:0, and autopush hands the word
+     * over as it is. (OUT is the mirror image: shifting left, it sends from
+     * bit 31 down, which is why the answer word is built from the top.)
+     * Found on the bench: reading bits 31:24 gave 0x00 for every address. */
+    const uint8_t byte = (uint8_t)pio_sm_get(pio, sm);
 
     if (!is_data) {
         const uint8_t addr = (uint8_t)(byte >> 1);

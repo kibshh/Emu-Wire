@@ -130,11 +130,13 @@ int main(void) {
 
         if (total != last_total) {
             last_total = total;
-            printf("  acked %lu, pointer set %lu (now 0x%02X)   NACKed: addr %lu, write %lu   "
-                   "last 0x%02X (addr 0x%02X %s)\n",
-                   (unsigned long)acked, (unsigned long)pointers, g_bus.devices[0].pointer,
-                   (unsigned long)unknown, (unsigned long)writes, frame, frame >> 1,
-                   (frame & 1u) ? "read" : "write");
+            // Counts first, then the last address: "NACKed: addr 6" read like
+            // "address 6" on the bench, so every number now says what it counts.
+            printf("  times ACKed %lu | NACKed: no such device %lu, write %lu | "
+                   "pointer set %lu times, now 0x%02X | last address 0x%02X %s (raw byte 0x%02X)\n",
+                   (unsigned long)acked, (unsigned long)unknown, (unsigned long)writes,
+                   (unsigned long)pointers, g_bus.devices[0].pointer, frame >> 1,
+                   (frame & 1u) ? "read" : "write", frame);
 
             // None of these can happen while the handshake behaves. Each means
             // the bus was, or still is, held low.
