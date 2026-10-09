@@ -29,3 +29,16 @@ Ideas that arrive mid-phase, parked here rather than pulled into the task in han
 
   `DEV_ATTACH` deliberately rejects the accidental case; this would be the
   opt-in one.
+
+- **Register pointer behaviour at STOP, per part** — most parts keep the
+  pointer across a STOP, so a read without a pointer write continues where
+  it left off. Some reset it to a fixed register. It belongs in each part's
+  manifest, e.g. `pointer_on_stop: keep` or `reset_to: 0x00`, so the
+  emulator matches the real silicon either way. Today it always keeps it.
+
+  Depends on the PIO program reporting STOP and repeated START as different
+  events. Both currently reach the CPU the same way, as "a new address
+  byte", and the program is at 32 of 32 instructions. Decide together with
+  burst reads, which need the same restructure.
+
+  Raised while working task 14, 2026-10-05.
