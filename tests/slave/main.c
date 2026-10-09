@@ -83,9 +83,10 @@ static void print_banner(void) {
 #endif
 }
 
-#if I2C_BUS_VERBOSE
 // One line per address call. The data bytes that follow it are added to the
-// same line, so a register access reads as one line.
+// same line, so a register access reads as one line. Anything else printed
+// must finish that line first, through end_line(). In a quiet build no line
+// is ever left open, and end_line() does nothing.
 static bool g_line_open;
 
 static void end_line(void) {
@@ -94,6 +95,8 @@ static void end_line(void) {
         g_line_open = false;
     }
 }
+
+#if I2C_BUS_VERBOSE
 
 static void print_entry(uint32_t entry) {
     const uint8_t byte = I2C_LOG_BYTE(entry);
@@ -158,15 +161,18 @@ typedef struct {
 static void report_problems(problems_t *seen) {
     const problems_t now = {g_bus.nacked_stray, g_bus.no_address, g_bus.tx_blocked};
     if (now.stray != seen->stray) {
-        printf("\n  !! PROBLEM: %lu data bytes arrived outside any transaction\n",
+        end_line();
+        printf("  !! PROBLEM: %lu data bytes arrived outside any transaction\n",
                (unsigned long)(now.stray - seen->stray));
     }
     if (now.no_addr != seen->no_addr) {
-        printf("\n  !! PROBLEM: %lu handshakes with no byte to read\n",
+        end_line();
+        printf("  !! PROBLEM: %lu handshakes with no byte to read\n",
                (unsigned long)(now.no_addr - seen->no_addr));
     }
     if (now.blocked != seen->blocked) {
-        printf("\n  !! PROBLEM: %lu handshakes with no room to answer: the bus may be stuck\n",
+        end_line();
+        printf("  !! PROBLEM: %lu handshakes with no room to answer: the bus may be stuck\n",
                (unsigned long)(now.blocked - seen->blocked));
     }
     *seen = now;
