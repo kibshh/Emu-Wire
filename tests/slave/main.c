@@ -83,21 +83,9 @@ static void print_banner(void) {
 #endif
 }
 
-// One line per address call. The data bytes that follow it are added to the
-// same line, so a register access reads as one line. Anything else printed
-// must finish that line first, through end_line(). In a quiet build no line
-// is ever left open, and end_line() does nothing.
-static bool g_line_open;
-
-static void end_line(void) {
-    if (g_line_open) {
-        printf("\n");
-        g_line_open = false;
-    }
-}
-
 #if I2C_BUS_VERBOSE
-
+// One line per log entry. The data bytes of a call are indented under its
+// address line, so a register write reads top to bottom.
 static void print_entry(uint32_t entry) {
     const uint8_t byte = I2C_LOG_BYTE(entry);
     const uint8_t value = I2C_LOG_VALUE(entry);
@@ -105,50 +93,37 @@ static void print_entry(uint32_t entry) {
 
     switch ((i2c_log_event_t)I2C_LOG_EVENT(entry)) {
     case I2C_LOG_ADDR_READ:
-        end_line();
-        printf("  0x%02X %-5s -> ACK, sent 0x%02X", byte >> 1, dir, value);
-        g_line_open = true;
+        printf("  0x%02X %-5s -> ACK, sent 0x%02X\n", byte >> 1, dir, value);
         break;
     case I2C_LOG_ADDR_WRITE:
-        end_line();
-        printf("  0x%02X %-5s -> ACK", byte >> 1, dir);
-        g_line_open = true;
+        printf("  0x%02X %-5s -> ACK\n", byte >> 1, dir);
         break;
     case I2C_LOG_ADDR_UNKNOWN:
-        end_line();
-        printf("  0x%02X %-5s -> NACK (no device at this address)", byte >> 1, dir);
-        g_line_open = true;
+        printf("  0x%02X %-5s -> NACK (no device at this address)\n", byte >> 1, dir);
         break;
     case I2C_LOG_DATA_POINTER:
-        printf(", pointer set to 0x%02X", byte);
+        printf("                pointer set to 0x%02X\n", byte);
         break;
     case I2C_LOG_DATA_REFUSED:
-        printf(", then 0x%02X -> NACK (the map is read-only)", byte);
+        printf("                then 0x%02X -> NACK (the map is read-only)\n", byte);
         break;
     case I2C_LOG_DATA_STRAY:
-        end_line();
-        printf("  data 0x%02X outside any transaction -> NACK", byte);
-        g_line_open = true;
+        printf("  data 0x%02X outside any transaction -> NACK\n", byte);
         break;
     }
 }
 
-// Print everything the IRQ handler has logged since the last call. Returns
-// whether there was anything.
-static bool drain_log(void) {
+// Print everything the IRQ handler has logged since the last call.
+static void drain_log(void) {
     const uint32_t head = g_bus.log_head;
     __dmb(); // the entries up to head are complete before we read them
     uint32_t tail = g_bus.log_tail;
-    if (tail == head) {
-        return false;
-    }
     while (tail != head) {
         print_entry(g_bus.log[tail & (I2C_BUS_LOG_SIZE - 1u)]);
         tail++;
     }
     __dmb(); // finished reading before the handler may reuse these slots
     g_bus.log_tail = tail;
-    return true;
 }
 #endif
 
@@ -161,17 +136,14 @@ typedef struct {
 static void report_problems(problems_t *seen) {
     const problems_t now = {g_bus.nacked_stray, g_bus.no_address, g_bus.tx_blocked};
     if (now.stray != seen->stray) {
-        end_line();
         printf("  !! PROBLEM: %lu data bytes arrived outside any transaction\n",
                (unsigned long)(now.stray - seen->stray));
     }
     if (now.no_addr != seen->no_addr) {
-        end_line();
         printf("  !! PROBLEM: %lu handshakes with no byte to read\n",
                (unsigned long)(now.no_addr - seen->no_addr));
     }
     if (now.blocked != seen->blocked) {
-        end_line();
         printf("  !! PROBLEM: %lu handshakes with no room to answer: the bus may be stuck\n",
                (unsigned long)(now.blocked - seen->blocked));
     }
@@ -219,23 +191,15 @@ int main(void) {
     bool was_connected = true;
 #if I2C_BUS_VERBOSE
     uint32_t dropped_seen = 0;
-    uint32_t last_entry_ms = 0;
 #endif
 
     while (true) {
 #if I2C_BUS_VERBOSE
-        const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
-        if (drain_log()) {
-            last_entry_ms = now_ms;
-        } else if (g_line_open && now_ms - last_entry_ms >= 100) {
-            // Nothing more came for this call: finish its line.
-            end_line();
-        }
+        drain_log();
 
         // A full log loses entries; say how many rather than skip them.
         const uint32_t dropped = g_bus.log_dropped;
         if (dropped != dropped_seen) {
-            end_line();
             printf("  ... %lu calls not shown: the log was full\n",
                    (unsigned long)(dropped - dropped_seen));
             dropped_seen = dropped;
