@@ -82,11 +82,12 @@ static const char *i2c_err(int rc, int expected_len) {
         return "";
     }
     if (rc == PICO_ERROR_TIMEOUT) {
-        snprintf(buf, sizeof buf, "timed out after %u us", TIMEOUT_US);
+        snprintf(buf, sizeof buf, "timed out after %u ms (a line held low?)", TIMEOUT_US / 1000);
     } else if (rc == PICO_ERROR_GENERIC) {
-        snprintf(buf, sizeof buf, "no ACK from 0x%02X", TARGET_ADDR);
+        snprintf(buf, sizeof buf, "no ACK from 0x%02X (nothing answered)", TARGET_ADDR);
     } else {
-        snprintf(buf, sizeof buf, "moved %d bytes, wanted %d", rc, expected_len);
+        // The SDK reports a NACKed data byte as the count that got through.
+        snprintf(buf, sizeof buf, "NACKed after %d of %d bytes", rc, expected_len);
     }
     return buf;
 }
@@ -166,8 +167,19 @@ static void t_burst_read(void) {
     }
     char detail[80];
     hex(detail, sizeof detail, buf, BURST_LEN);
+    bool tail_ff = true;
+    for (int i = 1; i < BURST_LEN; i++) {
+        if (buf[i] != 0xFF) {
+            tail_ff = false;
+        }
+    }
     if (all_same) {
         strncat(detail, " (all identical: pointer may not be incrementing)",
+                sizeof detail - strlen(detail) - 1);
+    } else if (tail_ff) {
+        // 0xFF is what a released bus reads, so this is one real byte and
+        // then nobody sending.
+        strncat(detail, " (only the first byte is real: the rest is an idle bus)",
                 sizeof detail - strlen(detail) - 1);
     }
     report("burst read (6 bytes)", true, detail);
@@ -243,7 +255,7 @@ static void t_clock_stretch_tolerance(void) {
     int64_t elapsed_us = absolute_time_diff_us(start, get_absolute_time());
 
     char detail[96];
-    snprintf(detail, sizeof detail, "%lld us for a 1-byte read", elapsed_us);
+    snprintf(detail, sizeof detail, "%lld us for a register read", elapsed_us);
     report("tolerates a stretched clock", rc == 1, rc == 1 ? detail : i2c_err(rc, 1));
 }
 
@@ -258,8 +270,8 @@ static int run_once(bool verbose) {
     g_fail = 0;
 
     if (verbose) {
-        printf("\nI2C master rig — target 0x%02X @ %u Hz, SCL GP%d, SDA GP%d\n", TARGET_ADDR,
-               g_baud, PIN_SCL, PIN_SDA);
+        printf("\nI2C master rig — target 0x%02X at %u kHz, SCL GP%d, SDA GP%d\n", TARGET_ADDR,
+               g_baud / 1000, PIN_SCL, PIN_SDA);
         printf("----------------------------------------------------------------\n");
     }
 
@@ -301,8 +313,11 @@ static void soak(void) {
 
 static void set_speed(uint baud) {
     g_baud = baud;
-    uint actual = i2c_set_baudrate(I2C_PORT, baud);
-    printf("Bus set to %u Hz (hardware reports %u Hz)\n", baud, actual);
+    uint nominal = i2c_set_baudrate(I2C_PORT, baud);
+    // i2c_set_baudrate() returns what it aimed for. The real clock is a little
+    // slower: measured 375 kHz at a 400 kHz setting.
+    printf("Bus set to %u kHz (nominal; the real clock runs a little slower)\n",
+           nominal / 1000);
 }
 
 static void help(void) {
@@ -345,7 +360,7 @@ int main(void) {
             // at a key. Reprint on reconnect instead.
             bool connected = stdio_usb_connected();
             if (connected && !was_connected) {
-                printf("\nEmuWire I2C master test rig — reconnected, %u Hz\n", g_baud);
+                printf("\nEmuWire I2C master test rig — reconnected, %u kHz\n", g_baud / 1000);
                 help();
             }
             was_connected = connected;

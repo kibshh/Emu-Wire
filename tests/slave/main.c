@@ -67,14 +67,75 @@ static void core1_main(void) {
 }
 
 static void print_banner(void) {
-    printf("\nEmuWire PIO I2C slave — register-addressed reads\n");
-    printf("  program:  %d of 32 instructions, loaded at offset %u\n", i2c_slave_program.length,
-           g_bus.offset);
-    printf("  pins:     SDA GP%d, SCL GP%d\n", PIN_SDA, PIN_SDA + 1);
-    printf("  answers:  0x%02X, register 0x%02X reads 0x%02X\n", OUR_ADDR, REG_CHIP_ID,
-           bmp280_regs[REG_CHIP_ID]);
-    printf("  core 1:   serving the handshake IRQ\n");
-    printf("  NOTE:     the map is read-only, so a register write is NACKed.\n\n");
+    printf("\nEmuWire PIO I2C slave\n");
+    printf("  program   %d of 32 PIO instructions, loaded at offset %u\n",
+           i2c_slave_program.length, g_bus.offset);
+    printf("  pins      SDA = GP%d, SCL = GP%d\n", PIN_SDA, PIN_SDA + 1);
+    printf("  device    0x%02X, a BMP280 register map (0x%02X reads 0x%02X)\n", OUR_ADDR,
+           REG_CHIP_ID, bmp280_regs[REG_CHIP_ID]);
+    printf("  writes    refused: the map is read-only for now\n");
+    printf("  core 1    serving the bus\n\n");
+    printf("After each burst of traffic, a summary of what the slave did:\n\n");
+}
+
+// What the IRQ handler has counted so far. Copied in one go, so a summary is
+// computed from one set of numbers rather than from counters still moving.
+typedef struct {
+    uint32_t acked, pointers, unknown, writes, stray, no_addr, blocked;
+} counts_t;
+
+static counts_t read_counts(void) {
+    counts_t c = {g_bus.acked,      g_bus.pointer_writes, g_bus.nacked_unknown,
+                  g_bus.nacked_write, g_bus.nacked_stray,  g_bus.no_address,
+                  g_bus.tx_blocked};
+    return c;
+}
+
+static uint32_t total(const counts_t *c) {
+    return c->acked + c->pointers + c->unknown + c->writes + c->stray + c->no_addr + c->blocked;
+}
+
+// One burst of traffic, as the difference between two snapshots.
+static void print_burst(const counts_t *now, const counts_t *before) {
+    const uint8_t frame = g_bus.last_frame;
+    const float t = (float)to_ms_since_boot(get_absolute_time()) / 1000.0f;
+
+    printf("  [%7.1f s] answered %lu, register pointer set %lu times (now 0x%02X), "
+           "last call 0x%02X %s\n",
+           t, (unsigned long)(now->acked - before->acked),
+           (unsigned long)(now->pointers - before->pointers), g_bus.devices[0].pointer,
+           frame >> 1, (frame & 1u) ? "read" : "write");
+
+    const uint32_t unknown = now->unknown - before->unknown;
+    const uint32_t writes = now->writes - before->writes;
+    if (unknown != 0 || writes != 0) {
+        printf("              refused");
+        if (unknown != 0) {
+            printf(" %lu (unknown address)", (unsigned long)unknown);
+        }
+        if (writes != 0) {
+            printf("%s %lu (write to the read-only map)", unknown != 0 ? "," : "",
+                   (unsigned long)writes);
+        }
+        printf("\n");
+    }
+
+    // None of these can happen while the handshake behaves. Each means the
+    // bus was held low, or is still being held.
+    const uint32_t stray = now->stray - before->stray;
+    const uint32_t no_addr = now->no_addr - before->no_addr;
+    const uint32_t blocked = now->blocked - before->blocked;
+    if (stray != 0) {
+        printf("  !! PROBLEM: %lu data bytes arrived outside any transaction\n",
+               (unsigned long)stray);
+    }
+    if (no_addr != 0) {
+        printf("  !! PROBLEM: %lu handshakes with no byte to read\n", (unsigned long)no_addr);
+    }
+    if (blocked != 0) {
+        printf("  !! PROBLEM: %lu handshakes with no room to answer: the bus may be stuck\n",
+               (unsigned long)blocked);
+    }
 }
 
 int main(void) {
@@ -114,37 +175,25 @@ int main(void) {
 
     print_banner();
 
-    uint32_t last_total = 0;
+    // Print once a burst of traffic has gone quiet, not on every change: a rig
+    // run is one burst, and one summary per run is readable where a line per
+    // counter change was not.
+    const uint32_t QUIET_MS = 300;
+    counts_t printed = read_counts();
+    uint32_t last_seen = total(&printed);
+    uint32_t last_change_ms = 0;
     bool was_connected = true;
 
     while (true) {
-        const uint32_t acked = g_bus.acked;
-        const uint32_t pointers = g_bus.pointer_writes;
-        const uint32_t unknown = g_bus.nacked_unknown;
-        const uint32_t writes = g_bus.nacked_write;
-        const uint32_t stray = g_bus.nacked_stray;
-        const uint32_t no_addr = g_bus.no_address;
-        const uint32_t blocked = g_bus.tx_blocked;
-        const uint8_t frame = g_bus.last_frame;
-        const uint32_t total = acked + pointers + unknown + writes + stray + no_addr + blocked;
+        const counts_t now = read_counts();
+        const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
 
-        if (total != last_total) {
-            last_total = total;
-            // Counts first, then the last address: "NACKed: addr 6" read like
-            // "address 6" on the bench, so every number now says what it counts.
-            printf("  times ACKed %lu | NACKed: no such device %lu, write %lu | "
-                   "pointer set %lu times, now 0x%02X | last address 0x%02X %s (raw byte 0x%02X)\n",
-                   (unsigned long)acked, (unsigned long)unknown, (unsigned long)writes,
-                   (unsigned long)pointers, g_bus.devices[0].pointer, frame >> 1,
-                   (frame & 1u) ? "read" : "write", frame);
-
-            // None of these can happen while the handshake behaves. Each means
-            // the bus was, or still is, held low.
-            if (no_addr != 0 || blocked != 0 || stray != 0) {
-                printf("  PROBLEM: %lu IRQs with no byte, %lu with no room to answer, "
-                       "%lu bytes outside a transaction\n",
-                       (unsigned long)no_addr, (unsigned long)blocked, (unsigned long)stray);
-            }
+        if (total(&now) != last_seen) {
+            last_seen = total(&now);
+            last_change_ms = now_ms;
+        } else if (total(&now) != total(&printed) && now_ms - last_change_ms >= QUIET_MS) {
+            print_burst(&now, &printed);
+            printed = now;
         }
 
         // Reopening the serial port otherwise shows a blank screen, with no
@@ -152,10 +201,9 @@ int main(void) {
         const bool connected = stdio_usb_connected();
         if (connected && !was_connected) {
             print_banner();
-            last_total = 0;
         }
         was_connected = connected;
 
-        sleep_ms(100);
+        sleep_ms(50);
     }
 }
