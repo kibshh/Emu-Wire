@@ -24,6 +24,7 @@
 
 #include <stdio.h>
 
+#include "hardware/sync.h"
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
 
@@ -74,68 +75,101 @@ static void print_banner(void) {
     printf("  device    0x%02X, a BMP280 register map (0x%02X reads 0x%02X)\n", OUR_ADDR,
            REG_CHIP_ID, bmp280_regs[REG_CHIP_ID]);
     printf("  writes    refused: the map is read-only for now\n");
-    printf("  core 1    serving the bus\n\n");
-    printf("After each burst of traffic, a summary of what the slave did:\n\n");
+    printf("  core 1    serving the bus\n");
+#if I2C_BUS_VERBOSE
+    printf("  log       every call on the bus, as it happens (verbose build)\n\n");
+#else
+    printf("  log       failures only (quiet build: I2C_BUS_VERBOSE=OFF)\n\n");
+#endif
 }
 
-// What the IRQ handler has counted so far. Copied in one go, so a summary is
-// computed from one set of numbers rather than from counters still moving.
-typedef struct {
-    uint32_t acked, pointers, unknown, writes, stray, no_addr, blocked;
-} counts_t;
+#if I2C_BUS_VERBOSE
+// One line per address call. The data bytes that follow it are added to the
+// same line, so a register access reads as one line.
+static bool g_line_open;
 
-static counts_t read_counts(void) {
-    counts_t c = {g_bus.acked,      g_bus.pointer_writes, g_bus.nacked_unknown,
-                  g_bus.nacked_write, g_bus.nacked_stray,  g_bus.no_address,
-                  g_bus.tx_blocked};
-    return c;
-}
-
-static uint32_t total(const counts_t *c) {
-    return c->acked + c->pointers + c->unknown + c->writes + c->stray + c->no_addr + c->blocked;
-}
-
-// One burst of traffic, as the difference between two snapshots.
-static void print_burst(const counts_t *now, const counts_t *before) {
-    const uint8_t frame = g_bus.last_frame;
-    const float t = (float)to_ms_since_boot(get_absolute_time()) / 1000.0f;
-
-    printf("  [%7.1f s] answered %lu, register pointer set %lu times (now 0x%02X), "
-           "last call 0x%02X %s\n",
-           t, (unsigned long)(now->acked - before->acked),
-           (unsigned long)(now->pointers - before->pointers), g_bus.devices[0].pointer,
-           frame >> 1, (frame & 1u) ? "read" : "write");
-
-    const uint32_t unknown = now->unknown - before->unknown;
-    const uint32_t writes = now->writes - before->writes;
-    if (unknown != 0 || writes != 0) {
-        printf("              refused");
-        if (unknown != 0) {
-            printf(" %lu (unknown address)", (unsigned long)unknown);
-        }
-        if (writes != 0) {
-            printf("%s %lu (write to the read-only map)", unknown != 0 ? "," : "",
-                   (unsigned long)writes);
-        }
+static void end_line(void) {
+    if (g_line_open) {
         printf("\n");
+        g_line_open = false;
     }
+}
 
-    // None of these can happen while the handshake behaves. Each means the
-    // bus was held low, or is still being held.
-    const uint32_t stray = now->stray - before->stray;
-    const uint32_t no_addr = now->no_addr - before->no_addr;
-    const uint32_t blocked = now->blocked - before->blocked;
-    if (stray != 0) {
-        printf("  !! PROBLEM: %lu data bytes arrived outside any transaction\n",
-               (unsigned long)stray);
+static void print_entry(uint32_t entry) {
+    const uint8_t byte = I2C_LOG_BYTE(entry);
+    const uint8_t value = I2C_LOG_VALUE(entry);
+    const char *dir = (byte & 1u) ? "read" : "write";
+
+    switch ((i2c_log_event_t)I2C_LOG_EVENT(entry)) {
+    case I2C_LOG_ADDR_READ:
+        end_line();
+        printf("  0x%02X %-5s -> ACK, sent 0x%02X", byte >> 1, dir, value);
+        g_line_open = true;
+        break;
+    case I2C_LOG_ADDR_WRITE:
+        end_line();
+        printf("  0x%02X %-5s -> ACK", byte >> 1, dir);
+        g_line_open = true;
+        break;
+    case I2C_LOG_ADDR_UNKNOWN:
+        end_line();
+        printf("  0x%02X %-5s -> NACK (no device at this address)", byte >> 1, dir);
+        g_line_open = true;
+        break;
+    case I2C_LOG_DATA_POINTER:
+        printf(", pointer set to 0x%02X", byte);
+        break;
+    case I2C_LOG_DATA_REFUSED:
+        printf(", then 0x%02X -> NACK (the map is read-only)", byte);
+        break;
+    case I2C_LOG_DATA_STRAY:
+        end_line();
+        printf("  data 0x%02X outside any transaction -> NACK", byte);
+        g_line_open = true;
+        break;
     }
-    if (no_addr != 0) {
-        printf("  !! PROBLEM: %lu handshakes with no byte to read\n", (unsigned long)no_addr);
+}
+
+// Print everything the IRQ handler has logged since the last call. Returns
+// whether there was anything.
+static bool drain_log(void) {
+    const uint32_t head = g_bus.log_head;
+    __dmb(); // the entries up to head are complete before we read them
+    uint32_t tail = g_bus.log_tail;
+    if (tail == head) {
+        return false;
     }
-    if (blocked != 0) {
-        printf("  !! PROBLEM: %lu handshakes with no room to answer: the bus may be stuck\n",
-               (unsigned long)blocked);
+    while (tail != head) {
+        print_entry(g_bus.log[tail & (I2C_BUS_LOG_SIZE - 1u)]);
+        tail++;
     }
+    __dmb(); // finished reading before the handler may reuse these slots
+    g_bus.log_tail = tail;
+    return true;
+}
+#endif
+
+// Failures, counted in every build. None of them can happen while the
+// handshake behaves; each means the bus was held low, or still is.
+typedef struct {
+    uint32_t stray, no_addr, blocked;
+} problems_t;
+
+static void report_problems(problems_t *seen) {
+    const problems_t now = {g_bus.nacked_stray, g_bus.no_address, g_bus.tx_blocked};
+    if (now.stray != seen->stray) {
+        printf("\n  !! PROBLEM: %lu data bytes arrived outside any transaction\n",
+               (unsigned long)(now.stray - seen->stray));
+    }
+    if (now.no_addr != seen->no_addr) {
+        printf("\n  !! PROBLEM: %lu handshakes with no byte to read\n",
+               (unsigned long)(now.no_addr - seen->no_addr));
+    }
+    if (now.blocked != seen->blocked) {
+        printf("\n  !! PROBLEM: %lu handshakes with no room to answer: the bus may be stuck\n",
+               (unsigned long)(now.blocked - seen->blocked));
+    }
+    *seen = now;
 }
 
 int main(void) {
@@ -175,26 +209,33 @@ int main(void) {
 
     print_banner();
 
-    // Print once a burst of traffic has gone quiet, not on every change: a rig
-    // run is one burst, and one summary per run is readable where a line per
-    // counter change was not.
-    const uint32_t QUIET_MS = 300;
-    counts_t printed = read_counts();
-    uint32_t last_seen = total(&printed);
-    uint32_t last_change_ms = 0;
+    problems_t problems = {0, 0, 0};
     bool was_connected = true;
+#if I2C_BUS_VERBOSE
+    uint32_t dropped_seen = 0;
+    uint32_t last_entry_ms = 0;
+#endif
 
     while (true) {
-        const counts_t now = read_counts();
+#if I2C_BUS_VERBOSE
         const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
-
-        if (total(&now) != last_seen) {
-            last_seen = total(&now);
-            last_change_ms = now_ms;
-        } else if (total(&now) != total(&printed) && now_ms - last_change_ms >= QUIET_MS) {
-            print_burst(&now, &printed);
-            printed = now;
+        if (drain_log()) {
+            last_entry_ms = now_ms;
+        } else if (g_line_open && now_ms - last_entry_ms >= 100) {
+            // Nothing more came for this call: finish its line.
+            end_line();
         }
+
+        // A full log loses entries; say how many rather than skip them.
+        const uint32_t dropped = g_bus.log_dropped;
+        if (dropped != dropped_seen) {
+            end_line();
+            printf("  ... %lu calls not shown: the log was full\n",
+                   (unsigned long)(dropped - dropped_seen));
+            dropped_seen = dropped;
+        }
+#endif
+        report_problems(&problems);
 
         // Reopening the serial port otherwise shows a blank screen, with no
         // way to tell a running slave from a dead one.
@@ -204,6 +245,6 @@ int main(void) {
         }
         was_connected = connected;
 
-        sleep_ms(50);
+        sleep_ms(10);
     }
 }

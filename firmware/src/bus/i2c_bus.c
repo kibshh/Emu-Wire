@@ -21,6 +21,24 @@
  * (which owns several) replaces this with a table indexed by state machine. */
 static i2c_bus_t *s_bus;
 
+#if I2C_BUS_VERBOSE
+/* Append one entry to the transaction log, or count it as dropped. Inlined
+ * into the handler, so it runs from RAM with it. */
+static __force_inline void i2c_bus_log(i2c_bus_t *bus, i2c_log_event_t event, uint8_t byte,
+                                       uint8_t value) {
+    const uint32_t head = bus->log_head;
+    if (head - bus->log_tail >= I2C_BUS_LOG_SIZE) {
+        bus->log_dropped++;
+        return;
+    }
+    bus->log[head & (I2C_BUS_LOG_SIZE - 1u)] =
+        (uint32_t)event | ((uint32_t)byte << 8) | ((uint32_t)value << 16);
+    /* The entry must be visible to the other core before the head says so. */
+    __dmb();
+    bus->log_head = head + 1u;
+}
+#endif
+
 static inline uint8_t i2c_device_read(const i2c_device_t *dev) {
     const uint8_t pointer = dev->pointer;
     return (pointer < dev->reg_count) ? dev->regs[pointer] : I2C_BUS_UNMAPPED_READ;
@@ -85,61 +103,92 @@ static void __not_in_flash_func(i2c_bus_handshake_isr)(void) {
      * Found on the bench: reading bits 31:24 gave 0x00 for every address. */
     const uint8_t byte = (uint8_t)pio_sm_get(pio, sm);
 
+    /* Decide first. Every branch sets the answer and what to log, and nothing
+     * here is diagnostic: only state the bus depends on is touched. */
+    uint32_t answer;
+    i2c_log_event_t event;
+    uint8_t value = 0;
+
     if (!is_data) {
         const uint8_t addr = (uint8_t)(byte >> 1);
         const bool is_read = (byte & 1u) != 0u;
-        bus->last_frame = byte;
 
         const uint8_t slot = bus->index[addr]; /* O(1): one load, no scan */
         if (slot == I2C_BUS_NO_DEVICE) {
             bus->active = I2C_BUS_NO_DEVICE;
-            bus->nacked_unknown++;
-            pio_sm_put(pio, sm, i2c_slave_answer(false, bus->pc_idle, 0));
-            return;
-        }
-
-        bus->active = slot;
-        bus->data_bytes = 0;
-        bus->acked++;
-
-        if (is_read) {
-            /* Read from wherever the pointer was left — by a pointer write
-             * just before this, or by the transaction before that. A part
-             * that has never been pointed anywhere reads register 0. */
-            pio_sm_put(pio, sm,
-                       i2c_slave_answer(true, bus->pc_tx, i2c_device_read(&bus->devices[slot])));
+            answer = i2c_slave_answer(false, bus->pc_idle, 0);
+            event = I2C_LOG_ADDR_UNKNOWN;
         } else {
-            pio_sm_put(pio, sm, i2c_slave_answer(true, bus->pc_rx, 0));
+            bus->active = slot;
+            bus->data_bytes = 0;
+            if (is_read) {
+                /* Read from wherever the pointer was left — by a pointer write
+                 * just before this, or by the transaction before that. A part
+                 * that has never been pointed anywhere reads register 0. */
+                value = i2c_device_read(&bus->devices[slot]);
+                answer = i2c_slave_answer(true, bus->pc_tx, value);
+                event = I2C_LOG_ADDR_READ;
+            } else {
+                answer = i2c_slave_answer(true, bus->pc_rx, 0);
+                event = I2C_LOG_ADDR_WRITE;
+            }
         }
-        return;
+    } else {
+        /* A data byte: the master is writing. */
+        const uint8_t slot = bus->active;
+        if (slot == I2C_BUS_NO_DEVICE) {
+            /* No transaction owns this byte. Reachable only if a byte was cut
+             * short mid-flight, leaving the marker set; the next address
+             * recovers it. Counted so a run of these is visible rather than
+             * mysterious. */
+            bus->nacked_stray++;
+            answer = i2c_slave_answer(false, bus->pc_idle, 0);
+            event = I2C_LOG_DATA_STRAY;
+        } else if (bus->data_bytes == 0) {
+            /* The first byte after a write address is the register pointer. */
+            bus->devices[slot].pointer = byte;
+            bus->data_bytes = 1;
+            answer = i2c_slave_answer(true, bus->pc_rx, 0);
+            event = I2C_LOG_DATA_POINTER;
+        } else {
+            /* Anything after it would be a register write, and there is
+             * nowhere to put it: the register map is read-only here. ACKing
+             * and discarding would be a lie the master cannot detect, so NACK
+             * and let it fail honestly. */
+            bus->active = I2C_BUS_NO_DEVICE;
+            answer = i2c_slave_answer(false, bus->pc_idle, 0);
+            event = I2C_LOG_DATA_REFUSED;
+        }
     }
 
-    /* A data byte: the master is writing. */
-    const uint8_t slot = bus->active;
-    if (slot == I2C_BUS_NO_DEVICE) {
-        /* No transaction owns this byte. Reachable only if a byte was cut
-         * short mid-flight, leaving the marker set; the next address recovers
-         * it. Counted so a run of these is visible rather than mysterious. */
-        bus->nacked_stray++;
-        pio_sm_put(pio, sm, i2c_slave_answer(false, bus->pc_idle, 0));
-        return;
-    }
+    /* Answer, and the master moves on. Everything after this line is after
+     * the clock has been released, so none of it can lengthen a stretch. */
+    pio_sm_put(pio, sm, answer);
 
-    if (bus->data_bytes == 0) {
-        /* The first byte after a write address is the register pointer. */
-        bus->devices[slot].pointer = byte;
-        bus->data_bytes = 1;
+#if I2C_BUS_VERBOSE
+    switch (event) {
+    case I2C_LOG_ADDR_READ:
+    case I2C_LOG_ADDR_WRITE:
+        bus->acked++;
+        bus->last_frame = byte;
+        break;
+    case I2C_LOG_ADDR_UNKNOWN:
+        bus->nacked_unknown++;
+        bus->last_frame = byte;
+        break;
+    case I2C_LOG_DATA_POINTER:
         bus->pointer_writes++;
-        pio_sm_put(pio, sm, i2c_slave_answer(true, bus->pc_rx, 0));
-        return;
+        break;
+    case I2C_LOG_DATA_REFUSED:
+        bus->nacked_write++;
+        break;
+    case I2C_LOG_DATA_STRAY:
+        break; /* already counted: a failure is counted verbose or not */
     }
-
-    /* Anything after it would be a register write, and there is nowhere to
-     * put it: the register map is read-only here. ACKing and discarding would
-     * be a lie the master cannot detect, so NACK and let it fail honestly. */
-    bus->nacked_write++;
-    bus->active = I2C_BUS_NO_DEVICE;
-    pio_sm_put(pio, sm, i2c_slave_answer(false, bus->pc_idle, 0));
+    i2c_bus_log(bus, event, byte, value);
+#else
+    (void)event; /* only the log needs it */
+#endif
 }
 
 emuwire_status_t i2c_bus_init(i2c_bus_t *bus, PIO pio, uint sm, uint pin_sda, uint bus_hz) {
@@ -163,14 +212,19 @@ emuwire_status_t i2c_bus_init(i2c_bus_t *bus, PIO pio, uint sm, uint pin_sda, ui
     bus->device_count = 0;
     bus->active = I2C_BUS_NO_DEVICE;
     bus->data_bytes = 0;
+#if I2C_BUS_VERBOSE
     bus->acked = 0;
     bus->pointer_writes = 0;
     bus->nacked_unknown = 0;
     bus->nacked_write = 0;
+    bus->last_frame = 0;
+    bus->log_head = 0;
+    bus->log_tail = 0;
+    bus->log_dropped = 0;
+#endif
     bus->nacked_stray = 0;
     bus->no_address = 0;
     bus->tx_blocked = 0;
-    bus->last_frame = 0;
 
     bus->pio = pio;
     bus->sm = sm;

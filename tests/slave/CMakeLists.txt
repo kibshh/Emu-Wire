@@ -39,6 +39,14 @@ pico_generate_pio_header(i2c_slave_bringup
 
 target_link_libraries(i2c_slave_bringup pico_stdlib hardware_pio pico_multicore)
 
+# Log every bus decision on the slave's terminal. OFF builds the quiet slave:
+# the IRQ handler answers the bus and nothing more, with the logging compiled
+# out rather than switched off. Changing it needs a re-configure:
+#   cmake -S tests/slave -B tests/slave/build -DI2C_BUS_VERBOSE=OFF ...
+option(I2C_BUS_VERBOSE "Log every I2C bus decision on the slave's terminal" ON)
+target_compile_definitions(i2c_slave_bringup PRIVATE
+    I2C_BUS_VERBOSE=$<BOOL:${I2C_BUS_VERBOSE}>)
+
 pico_enable_stdio_usb(i2c_slave_bringup 1)
 pico_enable_stdio_uart(i2c_slave_bringup 0)
 

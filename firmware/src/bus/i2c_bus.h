@@ -30,6 +30,38 @@
 #define I2C_BUS_ADDR_COUNT 128
 #define I2C_BUS_NO_DEVICE 0xFFu
 
+/* Verbose builds count statistics and keep a transaction log. Quiet builds
+ * (the default) compile all of it out: the IRQ handler answers the bus and
+ * returns, with not even a flag to check. Failure counters are kept either
+ * way — quiet means fewer messages, never hidden problems.
+ *
+ * Set at build time, e.g. -DI2C_BUS_VERBOSE=1. */
+#ifndef I2C_BUS_VERBOSE
+#define I2C_BUS_VERBOSE 0
+#endif
+
+/* The transaction log: one entry per decision, written by the IRQ handler
+ * and read by the other core. Verbose builds only.
+ *
+ * One writer and one reader, no locks: the handler fills an entry, then
+ * publishes it by advancing `log_head`; the reader consumes entries, then
+ * advances `log_tail`. A full log drops new entries and counts them, so a
+ * gap is always visible. Each entry is one word: event, byte, value. */
+#define I2C_BUS_LOG_SIZE 64u /* power of two: the index is a mask */
+
+typedef enum {
+    I2C_LOG_ADDR_READ = 1,   /* address with read: ACKed, value = byte sent */
+    I2C_LOG_ADDR_WRITE,      /* address with write: ACKed */
+    I2C_LOG_ADDR_UNKNOWN,    /* no device at the address: NACKed */
+    I2C_LOG_DATA_POINTER,    /* first data byte: taken as the register pointer */
+    I2C_LOG_DATA_REFUSED,    /* a later data byte: NACKed, the map is read-only */
+    I2C_LOG_DATA_STRAY,      /* a data byte outside any transaction: NACKed */
+} i2c_log_event_t;
+
+#define I2C_LOG_EVENT(e) ((uint8_t)((e) & 0xFFu))
+#define I2C_LOG_BYTE(e) ((uint8_t)(((e) >> 8) & 0xFFu))
+#define I2C_LOG_VALUE(e) ((uint8_t)(((e) >> 16) & 0xFFu))
+
 typedef struct {
     uint8_t addr;      /* 7-bit, without the R/W bit */
     uint8_t device_id;
@@ -67,17 +99,28 @@ typedef struct {
     volatile uint8_t active;     /* slot being addressed, or I2C_BUS_NO_DEVICE */
     volatile uint8_t data_bytes; /* data bytes taken since the address */
 
+#if I2C_BUS_VERBOSE
     /* Written by the IRQ handler only, read by the other core. Each is a
      * single aligned word, so a reader never sees half a value, but a group
-     * of them read together is not one instant. Diagnostics, not accounting. */
+     * of them read together is not one instant. Diagnostics, not accounting.
+     * They run after the answer is pushed, so they never lengthen a stretch. */
     volatile uint32_t acked;
     volatile uint32_t pointer_writes;  /* register pointer accepted */
     volatile uint32_t nacked_unknown;  /* no device at that address */
     volatile uint32_t nacked_write;    /* a write byte with nowhere to go */
+    volatile uint8_t last_frame;       /* last address byte seen, R/W bit included */
+
+    /* The transaction log — see I2C_BUS_LOG_SIZE. */
+    volatile uint32_t log[I2C_BUS_LOG_SIZE];
+    volatile uint32_t log_head;    /* next entry the handler writes */
+    volatile uint32_t log_tail;    /* next entry the reader takes; the reader advances it */
+    volatile uint32_t log_dropped; /* entries lost to a full log */
+#endif
+
+    /* Always counted, verbose or not: each one is a failure. */
     volatile uint32_t nacked_stray;    /* a data byte outside any transaction */
     volatile uint32_t no_address;      /* handshake IRQ with an empty RX FIFO */
     volatile uint32_t tx_blocked;      /* no room to answer: the bus will hang */
-    volatile uint8_t last_frame;       /* last address byte seen, R/W bit included */
 } i2c_bus_t;
 
 /* Claim a state machine and load the program. SDA and SCL must be
