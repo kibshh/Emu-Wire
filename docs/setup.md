@@ -248,7 +248,8 @@ If that says `rp2040`, your `-DPICO_BOARD` / `-DPICO_PLATFORM` didn't take.
 
 ```bash
 picotool info                                              # reads a board, no sudo
-openocd -f interface/cmsis-dap.cfg -f target/rp2350.cfg    # Debug Probe connects
+~/.pico-sdk/openocd/0.12.0+dev/openocd -s ~/.pico-sdk/openocd/0.12.0+dev/scripts \
+  -f interface/cmsis-dap.cfg -f target/rp2350.cfg          # Debug Probe connects
 sigrok-cli --scan                                          # analyzer found
 ```
 

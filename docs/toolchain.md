@@ -119,10 +119,11 @@ Drag-and-drop is fine until something hangs. OpenOCD speaks SWD (Arm's two-wire 
 The Raspberry Pi Debug Probe is a small board presenting a standard **CMSIS-DAP** interface plus a **separate UART**. That second part matters more than it sounds on any project where USB itself is under test: if your firmware's USB link is the thing you're debugging, you cannot also use it to print debug messages. The probe's UART is an independent channel.
 
 ```bash
-openocd -f interface/cmsis-dap.cfg -f target/rp2350.cfg
+~/.pico-sdk/openocd/0.12.0+dev/openocd -s ~/.pico-sdk/openocd/0.12.0+dev/scripts \
+  -f interface/cmsis-dap.cfg -f target/rp2350.cfg
 ```
 
-> Your distribution's `openocd` package is very likely too old to know what an RP2350 is. Check for `scripts/target/rp2350.cfg` before assuming otherwise.
+> Your distribution's `openocd` package is very likely too old to know what an RP2350 is, and if it is installed it comes first on PATH. That's why the command above names the pinned build by its full path, and passes `-s`, because the prebuilt keeps its scripts next to the binary. The wrong one is easy to spot: its banner says `0.12.0` instead of `0.12.0+dev`, and it stops on the RP2350 script with an error about an unknown `check-availability` event.
 
 One honest limitation: breakpoints change timing. For code with hard real-time constraints, a debugger tells you about state, and a logic analyzer tells you about timing. You need both, for different questions.
 

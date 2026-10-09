@@ -176,9 +176,12 @@ With hardware attached:
 
   picotool info                    # a Pico held in BOOTSEL, WITHOUT sudo
   sigrok-cli --scan                # the analyzer, listed as fx2lafw
-  openocd -s $ROOT/openocd/$OPENOCD_VER/scripts \\
+  $ROOT/openocd/$OPENOCD_VER/openocd \\
+    -s $ROOT/openocd/$OPENOCD_VER/scripts \\
     -f interface/cmsis-dap.cfg -f target/rp2350.cfg      # via the Debug Probe
 
-OpenOCD needs -s: the prebuilt keeps its scripts next to the binary, where
-it does not look by default.
+OpenOCD by full path, like the compiler: Ubuntu's own openocd may come first
+on PATH, and it is too old for the RP2350 scripts. Its banner says 0.12.0;
+the right one says 0.12.0+dev. And it needs -s: the prebuilt keeps its
+scripts next to the binary, where it does not look by default.
 EOF
