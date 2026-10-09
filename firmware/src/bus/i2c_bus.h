@@ -100,24 +100,17 @@ typedef struct {
     volatile uint8_t data_bytes; /* data bytes taken since the address */
 
 #if I2C_BUS_VERBOSE
-    /* Written by the IRQ handler only, read by the other core. Each is a
-     * single aligned word, so a reader never sees half a value, but a group
-     * of them read together is not one instant. Diagnostics, not accounting.
-     * They run after the answer is pushed, so they never lengthen a stretch. */
-    volatile uint32_t acked;
-    volatile uint32_t pointer_writes;  /* register pointer accepted */
-    volatile uint32_t nacked_unknown;  /* no device at that address */
-    volatile uint32_t nacked_write;    /* a write byte with nowhere to go */
-    volatile uint8_t last_frame;       /* last address byte seen, R/W bit included */
-
-    /* The transaction log — see I2C_BUS_LOG_SIZE. */
+    /* The transaction log — see I2C_BUS_LOG_SIZE. Written after the answer is
+     * pushed, so it never lengthens a stretch. */
     volatile uint32_t log[I2C_BUS_LOG_SIZE];
     volatile uint32_t log_head;    /* next entry the handler writes */
     volatile uint32_t log_tail;    /* next entry the reader takes; the reader advances it */
     volatile uint32_t log_dropped; /* entries lost to a full log */
 #endif
 
-    /* Always counted, verbose or not: each one is a failure. */
+    /* Failures, counted in every build. Written by the IRQ handler only, read
+     * by the other core; each is a single aligned word, so a reader never
+     * sees half a value. */
     volatile uint32_t nacked_stray;    /* a data byte outside any transaction */
     volatile uint32_t no_address;      /* handshake IRQ with an empty RX FIFO */
     volatile uint32_t tx_blocked;      /* no room to answer: the bus will hang */

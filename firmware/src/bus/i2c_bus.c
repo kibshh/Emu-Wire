@@ -166,25 +166,6 @@ static void __not_in_flash_func(i2c_bus_handshake_isr)(void) {
     pio_sm_put(pio, sm, answer);
 
 #if I2C_BUS_VERBOSE
-    switch (event) {
-    case I2C_LOG_ADDR_READ:
-    case I2C_LOG_ADDR_WRITE:
-        bus->acked++;
-        bus->last_frame = byte;
-        break;
-    case I2C_LOG_ADDR_UNKNOWN:
-        bus->nacked_unknown++;
-        bus->last_frame = byte;
-        break;
-    case I2C_LOG_DATA_POINTER:
-        bus->pointer_writes++;
-        break;
-    case I2C_LOG_DATA_REFUSED:
-        bus->nacked_write++;
-        break;
-    case I2C_LOG_DATA_STRAY:
-        break; /* already counted: a failure is counted verbose or not */
-    }
     i2c_bus_log(bus, event, byte, value);
 #else
     (void)event; /* only the log needs it */
@@ -213,11 +194,6 @@ emuwire_status_t i2c_bus_init(i2c_bus_t *bus, PIO pio, uint sm, uint pin_sda, ui
     bus->active = I2C_BUS_NO_DEVICE;
     bus->data_bytes = 0;
 #if I2C_BUS_VERBOSE
-    bus->acked = 0;
-    bus->pointer_writes = 0;
-    bus->nacked_unknown = 0;
-    bus->nacked_write = 0;
-    bus->last_frame = 0;
     bus->log_head = 0;
     bus->log_tail = 0;
     bus->log_dropped = 0;
