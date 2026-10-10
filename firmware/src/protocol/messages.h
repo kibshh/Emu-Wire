@@ -671,3 +671,4 @@ _Static_assert(sizeof(emuwire_evt_error_payload_t) == 20, "emuwire_evt_error_pay
 #define EMUWIRE_EVT_ERROR_PAYLOAD_TIMESTAMP_US_OFFSET 12u
 
 #endif /* EMUWIRE_MESSAGES_H */
+/* Deliberate hand edit, to prove the drift check catches it. Never merge. */
