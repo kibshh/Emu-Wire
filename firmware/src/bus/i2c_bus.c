@@ -178,16 +178,21 @@ static void __not_in_flash_func(i2c_bus_handshake_isr)(void) {
         bus->tx_reg = dev->pointer;
         bus->tx_byte = i2c_device_read(dev, bus->tx_reg);
         answer = i2c_slave_answer_send(false, bus->pc_tx, bus->tx_byte);
-    } else if (bus->data_bytes == 0) {
-        /* The first byte after a write address is the register pointer. */
+    } else if (bus->data_bytes == 0 ||
+               ((bus->devices[bus->active].flags & EMUWIRE_DEVICE_FLAGS_WRITE_PAIRS) &&
+                (bus->data_bytes & 1u) == 0u)) {
+        /* A register number. The first byte after a write address always is
+         * one; with WRITE_PAIRS, so is every byte after a value: the master
+         * writes reg, val, reg, val. */
         bus->devices[bus->active].pointer = byte;
-        bus->data_bytes = 1;
+        bus->data_bytes++;
         answer = i2c_slave_answer(true, bus->pc_rx);
         event = I2C_LOG_DATA_POINTER;
     } else {
         /* A value for the register at the pointer. */
         i2c_device_t *dev = &bus->devices[bus->active];
         const uint8_t reg = dev->pointer;
+        bus->data_bytes++;
         const bool writable = reg < dev->reg_count && dev->reg_flags != NULL &&
                               (dev->reg_flags[reg] & EMUWIRE_REGISTER_FLAGS_WRITABLE);
         value = reg;

@@ -101,9 +101,14 @@ static void print_pointer_mode(void) {
     const bool on_write = mode == EMUWIRE_AUTO_INCREMENT_ON_WRITE || mode == EMUWIRE_AUTO_INCREMENT_BOTH;
 
     // Test 9 writes 27 10 from 0xF4, then reads 2 bytes back from 0xF4.
-    // Writes that move put 27 in F4 and 10 in F5; writes that stay leave 10
-    // in F4. Reads that move then return F4 F5; reads that stay return F4 F4.
-    const char *burst_write = on_write ? (on_read ? "27 10" : "27 27") : (on_read ? "10 00" : "10 10");
+    // In pairs, 10 is the next register number, so only F4 = 27 changes.
+    // Otherwise writes that move put 27 in F4 and 10 in F5, and writes that
+    // stay leave 10 in F4. Reads that move then return F4 F5; reads that
+    // stay return F4 F4.
+    const bool pairs = (dev->flags & EMUWIRE_DEVICE_FLAGS_WRITE_PAIRS) != 0;
+    const char *burst_write = pairs      ? (on_read ? "27 00" : "27 27")
+                              : on_write ? (on_read ? "27 10" : "27 27")
+                                         : (on_read ? "10 00" : "10 10");
 
     printf("  pointer   auto-increment %s, %s at the end of the map\n", mode_name(mode),
            wrap ? "wraps to 0x00" : "stays on 0xFF");
@@ -112,6 +117,8 @@ static void print_pointer_mode(void) {
     printf("            rig test 9 (burst write 27 10) should read back %s\n", burst_write);
     printf("  writes    0xE0, 0xF4, 0xF5 writable; to any other register %s\n",
            (dev->flags & EMUWIRE_DEVICE_FLAGS_NACK_ON_RO_WRITE) ? "NACKed" : "ACKed and ignored");
+    printf("            %s\n", pairs ? "in register/value pairs, like a real BMP280"
+                                     : "a start register, then values");
 }
 
 static void print_banner(void) {
@@ -123,7 +130,7 @@ static void print_banner(void) {
            REG_CHIP_ID, bmp280_regs[REG_CHIP_ID]);
     print_pointer_mode();
     printf("  keys      a = next auto-increment mode, w = toggle wrap,\n");
-    printf("            n = toggle NACK on read-only writes\n");
+    printf("            n = toggle NACK on read-only writes, p = toggle pair writes\n");
     printf("  core 1    serving the bus\n");
 #if I2C_BUS_VERBOSE
     printf("  log       every call on the bus, as it happens (verbose build)\n\n");
@@ -222,11 +229,12 @@ int main(void) {
     emuwire_status_t st = i2c_bus_init(&g_bus, pio0, 0, PIN_SDA, BUS_HZ);
     if (st == EMUWIRE_STATUS_OK) {
         // Like a real BMP280: the pointer moves on after each byte read.
-        // Read-only writes are ignored rather than NACKed. Which one a real
-        // BMP280 does is what rig test 8 shows; set this to match it.
+        // As measured on a real BMP280 (rig tests 8 and 9, 2026-10-10): a
+        // write to a read-only register is ACKed and ignored, and a write is
+        // register/value pairs.
         st = i2c_bus_attach(&g_bus, OUR_ADDR, OUR_DEVICE_ID, bmp280_regs, bmp280_flags,
                             sizeof bmp280_regs, EMUWIRE_AUTO_INCREMENT_ON_READ,
-                            EMUWIRE_DEVICE_FLAGS_WRAP);
+                            EMUWIRE_DEVICE_FLAGS_WRAP | EMUWIRE_DEVICE_FLAGS_WRITE_PAIRS);
     }
 
     // Only start the bus if it is set up. A state machine that stretches with
@@ -281,14 +289,16 @@ int main(void) {
         // The device's mode is read by core 1 on every byte; a single-byte
         // store here is seen there whole.
         const int key = getchar_timeout_us(0);
-        if (key == 'a' || key == 'w' || key == 'n') {
+        if (key == 'a' || key == 'w' || key == 'n' || key == 'p') {
             i2c_device_t *dev = &g_bus.devices[0];
             if (key == 'a') {
                 dev->auto_increment = (uint8_t)((dev->auto_increment + 1u) % 4u);
             } else if (key == 'w') {
                 dev->flags ^= EMUWIRE_DEVICE_FLAGS_WRAP;
-            } else {
+            } else if (key == 'n') {
                 dev->flags ^= EMUWIRE_DEVICE_FLAGS_NACK_ON_RO_WRITE;
+            } else {
+                dev->flags ^= EMUWIRE_DEVICE_FLAGS_WRITE_PAIRS;
             }
             printf("\n");
             print_pointer_mode();
