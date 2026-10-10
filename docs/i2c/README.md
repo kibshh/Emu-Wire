@@ -676,7 +676,7 @@ The pico-sdk's `i2c_write` still reported success. It checks for a NACK as soon 
 
 So, two practical points:
 
-- **If you drive EmuWire from a pico-sdk board**, a NACKed write may be reported as successful, followed by a mysterious timeout. That's the controller, not EmuWire.
+- **If you drive EmuWire from a pico-sdk board**, a NACKed write may be reported as successful, followed by a mysterious timeout. That's the controller, not EmuWire. The workaround: after each `i2c_write`, check the controller's own abort flag (`raw_intr_stat` & `TX_ABRT`). If it is set, the write was refused; read `tx_abrt_source` for why, and read `clr_tx_abrt` to clear it so the next call starts clean. The project's test rig does exactly this, in `rig_write()` in [`tests/rig/main.c`](../../tests/rig/main.c).
 - It's a good example of what an emulator is for: real firmware on a real bus behaving differently from what the driver promised.
 
 ### What the test rig checks
