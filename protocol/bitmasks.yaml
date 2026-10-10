@@ -33,6 +33,11 @@ bitmasks:
       NACK_ON_RO_WRITE:  {bit: 1}
       # Emit EVT_DEV_ACCESS for every access by the DUT.
       REPORT_ACCESS:     {bit: 2}
+      # A write is register/value pairs: reg, val, reg, val. Each value goes
+      # to the register named just before it, so auto-increment on write
+      # does not apply. Bosch sensors (BMP280 and relatives) work this way,
+      # and their drivers write several registers in one transaction like it.
+      WRITE_PAIRS:       {bit: 3}
 
   register_flags:
     type: u8

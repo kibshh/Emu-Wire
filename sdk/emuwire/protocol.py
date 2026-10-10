@@ -271,6 +271,7 @@ class DeviceFlags(IntEnum):
     WRAP = 1 << 0
     NACK_ON_RO_WRITE = 1 << 1
     REPORT_ACCESS = 1 << 2
+    WRITE_PAIRS = 1 << 3
 
 class RegisterFlags(IntEnum):
     WRITABLE = 1 << 0

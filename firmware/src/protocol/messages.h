@@ -183,6 +183,7 @@ typedef enum {  /* derived from messages/ */
 #define EMUWIRE_DEVICE_FLAGS_WRAP ((uint8_t)(1u << 0))
 #define EMUWIRE_DEVICE_FLAGS_NACK_ON_RO_WRITE ((uint8_t)(1u << 1))
 #define EMUWIRE_DEVICE_FLAGS_REPORT_ACCESS ((uint8_t)(1u << 2))
+#define EMUWIRE_DEVICE_FLAGS_WRITE_PAIRS ((uint8_t)(1u << 3))
 
 #define EMUWIRE_REGISTER_FLAGS_WRITABLE ((uint8_t)(1u << 0))
 #define EMUWIRE_REGISTER_FLAGS_USER_SETTABLE ((uint8_t)(1u << 1))
