@@ -57,6 +57,7 @@ typedef enum {
     I2C_LOG_DATA_WRITTEN,    /* a data byte stored: byte = the value, value = the register */
     I2C_LOG_DATA_IGNORED,    /* to a read-only register, ACKed and dropped like the real part */
     I2C_LOG_DATA_REFUSED,    /* to a read-only register, NACKed like the real part */
+    I2C_LOG_DATA_NO_REGISTERS, /* to a streaming device, which has nothing to write to */
     I2C_LOG_DATA_STRAY,      /* a data byte outside any transaction: NACKed */
     I2C_LOG_TX_SENT,         /* a byte went out: byte = what the bus carried, value = its register */
     I2C_LOG_TX_MISMATCH,     /* the bus carried something else: byte = the bus, value = ours */
@@ -77,6 +78,12 @@ typedef struct {
     uint8_t *regs;
     const uint8_t *reg_flags;
     uint16_t reg_count;
+
+    /* An emuwire_reg_addr_width_t. WIDTH_8: the master writes a register
+     * number before it reads or writes. STREAMING: the device has no register
+     * pointer at all; every read starts at the first byte of `regs` and runs
+     * on, so array order is stream order, and a write has nowhere to go. */
+    uint8_t reg_addr_width;
 
     /* Where the next read starts. The master sets it by writing one byte
      * after the address, which is how every register-addressed part works.
@@ -147,18 +154,25 @@ typedef struct {
  */
 emuwire_status_t i2c_bus_init(i2c_bus_t *bus, PIO pio, uint sm, uint pin_sda, uint bus_hz);
 
-/* Attach a device at a 7-bit address, backed by a register map and its
- * per-register flags, both owned and kept alive by the caller. Rejects
- * reserved addresses and an address that is already taken: two devices at
- * one address is a wiring fault that answers with the bitwise AND of both,
- * which is never what a test meant to set up.
- *
- * auto_increment is an emuwire_auto_increment_t; flags are
- * emuwire_device_flags (WRAP and NACK_ON_RO_WRITE).
- */
-emuwire_status_t i2c_bus_attach(i2c_bus_t *bus, uint8_t addr, uint8_t device_id,
-                                uint8_t *regs, const uint8_t *reg_flags, uint16_t reg_count,
-                                uint8_t auto_increment, uint8_t flags);
+/* Everything that describes one device, for i2c_bus_attach(). The fields
+ * mean what the same fields of i2c_device_t mean; the map and its flags stay
+ * owned by the caller and must outlive the bus. */
+typedef struct {
+    uint8_t addr; /* 7-bit */
+    uint8_t device_id;
+    uint8_t *regs;
+    const uint8_t *reg_flags;     /* may be NULL: all read-only */
+    uint16_t reg_count;           /* 1..256 */
+    uint8_t reg_addr_width;       /* emuwire_reg_addr_width_t: WIDTH_8 or STREAMING */
+    uint8_t auto_increment;       /* emuwire_auto_increment_t; ignored when streaming */
+    uint8_t flags;                /* emuwire_device_flags */
+} i2c_device_config_t;
+
+/* Attach a device. Rejects reserved addresses and an address that is
+ * already taken: two devices at one address is a wiring fault that answers
+ * with the bitwise AND of both, which is never what a test meant to set up.
+ * Rejects WIDTH_16 too, for now: no 16-bit register addressing yet. */
+emuwire_status_t i2c_bus_attach(i2c_bus_t *bus, const i2c_device_config_t *config);
 
 /* Install the handshake IRQ handler and start the state machine.
  *

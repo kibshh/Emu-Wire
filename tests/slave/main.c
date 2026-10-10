@@ -39,6 +39,12 @@
 #define OUR_ADDR 0x76
 #define OUR_DEVICE_ID 1
 
+// A second device with no registers at all: every read returns its sample,
+// from the first byte. Made up, not a real part; just two distinct bytes.
+#define STREAM_ADDR 0x40
+#define STREAM_DEVICE_ID 2
+static uint8_t stream_sample[2] = {0x12, 0x34};
+
 /*
  * Enough of a BMP280 to be recognised. The chip id is the real one; the
  * measurement registers hold fixed, made-up values, so a burst read has
@@ -126,6 +132,8 @@ static void print_banner(void) {
     printf("  program   %d of 32 PIO instructions, loaded at offset %u\n",
            i2c_slave_program.length, g_bus.offset);
     printf("  pins      SDA = GP%d, SCL = GP%d\n", PIN_SDA, PIN_SDA + 1);
+    printf("  device    0x%02X, no registers: every read returns %02X %02X\n", STREAM_ADDR,
+           stream_sample[0], stream_sample[1]);
     printf("  device    0x%02X, a BMP280 register map (0x%02X reads 0x%02X)\n", OUR_ADDR,
            REG_CHIP_ID, bmp280_regs[REG_CHIP_ID]);
     print_pointer_mode();
@@ -171,6 +179,9 @@ static void print_entry(uint32_t entry) {
         break;
     case I2C_LOG_DATA_IGNORED:
         printf("                0x%02X to register 0x%02X ignored (read-only)\n", byte, value);
+        break;
+    case I2C_LOG_DATA_NO_REGISTERS:
+        printf("                0x%02X ignored (this device has no registers)\n", byte);
         break;
     case I2C_LOG_DATA_REFUSED:
         printf("                0x%02X to register 0x%02X -> NACK (read-only)\n", byte, value);
@@ -232,9 +243,31 @@ int main(void) {
         // As measured on a real BMP280 (rig tests 8 and 9, 2026-10-10): a
         // write to a read-only register is ACKed and ignored, and a write is
         // register/value pairs.
-        st = i2c_bus_attach(&g_bus, OUR_ADDR, OUR_DEVICE_ID, bmp280_regs, bmp280_flags,
-                            sizeof bmp280_regs, EMUWIRE_AUTO_INCREMENT_ON_READ,
-                            EMUWIRE_DEVICE_FLAGS_WRAP | EMUWIRE_DEVICE_FLAGS_WRITE_PAIRS);
+        const i2c_device_config_t bmp280 = {
+            .addr = OUR_ADDR,
+            .device_id = OUR_DEVICE_ID,
+            .regs = bmp280_regs,
+            .reg_flags = bmp280_flags,
+            .reg_count = sizeof bmp280_regs,
+            .reg_addr_width = EMUWIRE_REG_ADDR_WIDTH_WIDTH_8,
+            .auto_increment = EMUWIRE_AUTO_INCREMENT_ON_READ,
+            .flags = EMUWIRE_DEVICE_FLAGS_WRAP | EMUWIRE_DEVICE_FLAGS_WRITE_PAIRS,
+        };
+        st = i2c_bus_attach(&g_bus, &bmp280);
+    }
+    if (st == EMUWIRE_STATUS_OK) {
+        // Past the end of its sample it stays on the last byte.
+        const i2c_device_config_t stream = {
+            .addr = STREAM_ADDR,
+            .device_id = STREAM_DEVICE_ID,
+            .regs = stream_sample,
+            .reg_flags = NULL,
+            .reg_count = sizeof stream_sample,
+            .reg_addr_width = EMUWIRE_REG_ADDR_WIDTH_STREAMING,
+            .auto_increment = EMUWIRE_AUTO_INCREMENT_NONE,
+            .flags = 0,
+        };
+        st = i2c_bus_attach(&g_bus, &stream);
     }
 
     // Only start the bus if it is set up. A state machine that stretches with

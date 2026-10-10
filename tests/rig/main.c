@@ -49,6 +49,11 @@
 #define BURST_LEN 6         // press[3] + temp[3]
 #define REG_END_OF_MAP 0xFE // 2 registers before the 8-bit pointer runs out
 
+// The bring-up slave's second device: no registers, and every read returns
+// this sample from its first byte. Not on the bus with a real BMP280.
+#define STREAM_ADDR 0x40
+static const uint8_t STREAM_SAMPLE[2] = {0x12, 0x34};
+
 // Generous, because a slave may legitimately stretch the clock. The emulator
 // stretches on every address match — that is the mechanism that lets one state
 // machine answer several addresses — so a tight timeout here would report a
@@ -61,6 +66,7 @@
 
 static int g_pass;
 static int g_fail;
+static int g_skip;
 
 static void report(const char *name, bool ok, const char *detail) {
     printf("  %-34s %s", name, ok ? "PASS" : "FAIL");
@@ -73,6 +79,14 @@ static void report(const char *name, bool ok, const char *detail) {
     } else {
         g_fail++;
     }
+}
+
+/* A test that needs a device the bus does not have. Neither a pass nor a
+ * failure: running the rig against a real BMP280 is not wrong, it just cannot
+ * test what only the emulator has. */
+static void report_skip(const char *name, const char *detail) {
+    printf("  %-34s SKIP   %s\n", name, detail);
+    g_skip++;
 }
 
 /* Turn a pico-sdk I2C return into something readable. The SDK returns the
@@ -289,6 +303,38 @@ static void t_burst_write(void) {
     report("burst write (2 bytes)", true, detail);
 }
 
+/* 10. Raw read from a device with no registers.
+ *
+ * Some devices have no register pointer: a read just returns the current
+ * sample, from its first byte. Read it twice with no pointer write in
+ * between; both must start at the beginning, or the device is behaving as if
+ * it had a pointer after all. */
+static void t_streaming_read(void) {
+    uint8_t first[2] = {0};
+    uint8_t second[2] = {0};
+    int rc = i2c_read_timeout_us(I2C_PORT, STREAM_ADDR, first, 2, false, TIMEOUT_US);
+    if (rc == PICO_ERROR_GENERIC) {
+        report_skip("raw read, no registers (0x40)", "nothing at 0x40");
+        return;
+    }
+    if (rc == 2) {
+        rc = i2c_read_timeout_us(I2C_PORT, STREAM_ADDR, second, 2, false, TIMEOUT_US);
+    }
+    if (rc != 2) {
+        report("raw read, no registers (0x40)", false, i2c_err(rc, 2));
+        return;
+    }
+
+    char detail[80];
+    char half[16];
+    hex(half, sizeof half, first, 2);
+    snprintf(detail, sizeof detail, "%sthen ", half);
+    hex(half, sizeof half, second, 2);
+    strncat(detail, half, sizeof detail - strlen(detail) - 1);
+    const bool ok = memcmp(first, STREAM_SAMPLE, 2) == 0 && memcmp(second, STREAM_SAMPLE, 2) == 0;
+    report("raw read, no registers (0x40)", ok, detail);
+}
+
 /* 7. Burst read across the end of the register map.
  *
  * Four bytes from 0xFE run past the last register. What comes back depends on
@@ -392,6 +438,7 @@ static uint g_baud = 400000;
 static int run_once(bool verbose) {
     g_pass = 0;
     g_fail = 0;
+    g_skip = 0;
 
     if (verbose) {
         printf("\nI2C master rig — target 0x%02X at %u kHz, SCL GP%d, SDA GP%d\n", TARGET_ADDR,
@@ -408,10 +455,15 @@ static int run_once(bool verbose) {
     t_burst_across_end();
     t_read_only_write();
     t_burst_write();
+    t_streaming_read();
 
     if (verbose) {
         printf("----------------------------------------------------------------\n");
-        printf("%d passed, %d failed\n", g_pass, g_fail);
+        if (g_skip != 0) {
+            printf("%d passed, %d failed, %d skipped\n", g_pass, g_fail, g_skip);
+        } else {
+            printf("%d passed, %d failed\n", g_pass, g_fail);
+        }
         if (g_fail == 0) {
             printf("ALL TRANSACTIONS CORRECT\n");
         }

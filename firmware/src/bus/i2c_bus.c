@@ -48,7 +48,8 @@ static inline uint8_t i2c_device_read(const i2c_device_t *dev, uint8_t reg) {
  * end of the map it rolls to 0 with WRAP, and otherwise stays put. */
 static inline uint8_t i2c_device_next(const i2c_device_t *dev, uint8_t reg, bool was_read) {
     const uint8_t mode = dev->auto_increment;
-    const bool moves = (mode == EMUWIRE_AUTO_INCREMENT_BOTH) ||
+    const bool moves = (dev->reg_addr_width == EMUWIRE_REG_ADDR_WIDTH_STREAMING) ||
+                       (mode == EMUWIRE_AUTO_INCREMENT_BOTH) ||
                        (mode == (was_read ? EMUWIRE_AUTO_INCREMENT_ON_READ
                                           : EMUWIRE_AUTO_INCREMENT_ON_WRITE));
     if (!moves) {
@@ -142,7 +143,12 @@ static void __not_in_flash_func(i2c_bus_handshake_isr)(void) {
                 /* Read from wherever the pointer was left — by a pointer write
                  * just before this, or by the transaction before that. A part
                  * that has never been pointed anywhere reads register 0. The
-                 * pointer only moves once the byte has really gone out. */
+                 * pointer only moves once the byte has really gone out. A
+                 * streaming device has no pointer: every read starts at the
+                 * beginning of its sample. */
+                if (dev->reg_addr_width == EMUWIRE_REG_ADDR_WIDTH_STREAMING) {
+                    dev->pointer = 0;
+                }
                 bus->tx_reg = dev->pointer;
                 bus->tx_byte = i2c_device_read(dev, bus->tx_reg);
                 answer = i2c_slave_answer_send(true, bus->pc_tx, bus->tx_byte);
@@ -178,6 +184,17 @@ static void __not_in_flash_func(i2c_bus_handshake_isr)(void) {
         bus->tx_reg = dev->pointer;
         bus->tx_byte = i2c_device_read(dev, bus->tx_reg);
         answer = i2c_slave_answer_send(false, bus->pc_tx, bus->tx_byte);
+    } else if (bus->devices[bus->active].reg_addr_width == EMUWIRE_REG_ADDR_WIDTH_STREAMING) {
+        /* A write to a device with no registers. There is nothing to store the
+         * byte in, so it goes the way a read-only write does on this device:
+         * NACKed, or ACKed and dropped. Logged either way. */
+        if (bus->devices[bus->active].flags & EMUWIRE_DEVICE_FLAGS_NACK_ON_RO_WRITE) {
+            bus->active = I2C_BUS_NO_DEVICE;
+            answer = i2c_slave_answer(false, bus->pc_idle);
+        } else {
+            answer = i2c_slave_answer(true, bus->pc_rx);
+        }
+        event = I2C_LOG_DATA_NO_REGISTERS;
     } else if (bus->data_bytes == 0 ||
                ((bus->devices[bus->active].flags & EMUWIRE_DEVICE_FLAGS_WRITE_PAIRS) &&
                 (bus->data_bytes & 1u) == 0u)) {
@@ -279,13 +296,17 @@ emuwire_status_t i2c_bus_init(i2c_bus_t *bus, PIO pio, uint sm, uint pin_sda, ui
     return EMUWIRE_STATUS_OK;
 }
 
-emuwire_status_t i2c_bus_attach(i2c_bus_t *bus, uint8_t addr, uint8_t device_id,
-                                uint8_t *regs, const uint8_t *reg_flags, uint16_t reg_count,
-                                uint8_t auto_increment, uint8_t flags) {
-    if (bus == NULL || addr >= I2C_BUS_ADDR_COUNT || regs == NULL || reg_count == 0u ||
-        reg_count > 256u || auto_increment > EMUWIRE_AUTO_INCREMENT_BOTH) {
+emuwire_status_t i2c_bus_attach(i2c_bus_t *bus, const i2c_device_config_t *config) {
+    if (bus == NULL || config == NULL || config->addr >= I2C_BUS_ADDR_COUNT ||
+        config->regs == NULL || config->reg_count == 0u || config->reg_count > 256u ||
+        config->auto_increment > EMUWIRE_AUTO_INCREMENT_BOTH) {
         return EMUWIRE_STATUS_ERR_BAD_PARAM;
     }
+    if (config->reg_addr_width != EMUWIRE_REG_ADDR_WIDTH_WIDTH_8 &&
+        config->reg_addr_width != EMUWIRE_REG_ADDR_WIDTH_STREAMING) {
+        return EMUWIRE_STATUS_ERR_NOT_IMPLEMENTED; /* WIDTH_16 */
+    }
+    const uint8_t addr = config->addr;
     if (addr <= I2C_ADDR_RESERVED_LOW || addr >= I2C_ADDR_RESERVED_HIGH) {
         return EMUWIRE_STATUS_ERR_ADDRESS_RESERVED;
     }
@@ -297,14 +318,16 @@ emuwire_status_t i2c_bus_attach(i2c_bus_t *bus, uint8_t addr, uint8_t device_id,
     }
 
     const uint8_t slot = bus->device_count;
-    bus->devices[slot].addr = addr;
-    bus->devices[slot].device_id = device_id;
-    bus->devices[slot].regs = regs;
-    bus->devices[slot].reg_flags = reg_flags;
-    bus->devices[slot].reg_count = reg_count;
-    bus->devices[slot].pointer = 0;
-    bus->devices[slot].auto_increment = auto_increment;
-    bus->devices[slot].flags = flags;
+    i2c_device_t *dev = &bus->devices[slot];
+    dev->addr = addr;
+    dev->device_id = config->device_id;
+    dev->regs = config->regs;
+    dev->reg_flags = config->reg_flags;
+    dev->reg_count = config->reg_count;
+    dev->reg_addr_width = config->reg_addr_width;
+    dev->pointer = 0;
+    dev->auto_increment = config->auto_increment;
+    dev->flags = config->flags;
 
     /* Published last: the IRQ handler reads the index, so the slot it points
      * at must already be complete. */
