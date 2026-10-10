@@ -42,6 +42,7 @@
 // BMP280 registers. The emulator answers the same map, so one rig serves both.
 #define REG_CHIP_ID 0xD0
 #define REG_CTRL_MEAS 0xF4
+#define REG_CONFIG 0xF5     // writable too: standby time and filter
 #define REG_PRESS_MSB 0xF7  // the burst read starts here and runs to 0xFC
 
 #define EXPECT_CHIP_ID 0x58 // 0x58 = BMP280. 0x60 = BME280, a different part.
@@ -77,6 +78,10 @@ static void report(const char *name, bool ok, const char *detail) {
 /* Turn a pico-sdk I2C return into something readable. The SDK returns the
  * byte count on success, or a negative error; a NACK and a timeout are
  * different failures and the difference matters when diagnosing a bus. */
+// Returned by rig_write() when the SDK reported success but the controller
+// had latched a NACK on a data byte. See rig_write().
+#define RIG_ERR_LATE_NACK (-1000)
+
 static const char *i2c_err(int rc, int expected_len) {
     static char buf[64];
     if (rc == expected_len) {
@@ -86,6 +91,8 @@ static const char *i2c_err(int rc, int expected_len) {
         snprintf(buf, sizeof buf, "timed out after %u ms (a line held low?)", TIMEOUT_US / 1000);
     } else if (rc == PICO_ERROR_GENERIC) {
         snprintf(buf, sizeof buf, "no ACK from 0x%02X (nothing answered)", TARGET_ADDR);
+    } else if (rc == RIG_ERR_LATE_NACK) {
+        snprintf(buf, sizeof buf, "a data byte was NACKed (the SDK missed it)");
     } else {
         // The SDK reports a NACKed data byte as the count that got through.
         snprintf(buf, sizeof buf, "NACKed after %d of %d bytes", rc, expected_len);
@@ -106,10 +113,40 @@ static void hex(char *out, size_t out_len, const uint8_t *data, int n) {
 // The transaction set
 // ---------------------------------------------------------------------------
 
+/* i2c_write_timeout_us(), plus the NACK it can miss.
+ *
+ * The SDK checks for a NACK as soon as a byte has been shifted out, before
+ * the ninth clock. A target that stretches the clock before answering — the
+ * emulator does, on every byte — NACKs after that check, so the SDK reports
+ * success. The abort then stays latched in the controller and makes the next
+ * call fail instead, with a timeout. Found on the bench.
+ *
+ * So after every write, look at the controller ourselves: a latched abort
+ * means the write did not all get through. Clear it, so it cannot poison the
+ * next call, and say what really happened.
+ *
+ * It can only catch a NACK that has happened by the time the SDK returns. For
+ * a write ending in STOP the SDK waits for the STOP, which comes after the
+ * NACK, so it always has. For a write with nostop it may not have — but the
+ * rig only uses those for register pointers, which a target does not refuse. */
+static int rig_write(const uint8_t *src, size_t len, bool nostop) {
+    i2c_hw_t *hw = i2c_get_hw(I2C_PORT);
+    int rc = i2c_write_timeout_us(I2C_PORT, TARGET_ADDR, src, len, nostop, TIMEOUT_US);
+    if (hw->raw_intr_stat & I2C_IC_RAW_INTR_STAT_TX_ABRT_BITS) {
+        const uint32_t reason = hw->tx_abrt_source;
+        (void)hw->clr_tx_abrt; // reading it clears the abort
+        if (rc == (int)len) {
+            rc = (reason & I2C_IC_TX_ABRT_SOURCE_ABRT_7B_ADDR_NOACK_BITS) ? PICO_ERROR_GENERIC
+                                                                          : RIG_ERR_LATE_NACK;
+        }
+    }
+    return rc;
+}
+
 /* Set the register pointer, then read from it in a separate transaction.
  * Helper for the tests below, not a test itself. */
 static int read_regs(uint8_t reg, uint8_t *dst, int len) {
-    int rc = i2c_write_timeout_us(I2C_PORT, TARGET_ADDR, &reg, 1, true, TIMEOUT_US);
+    int rc = rig_write(&reg, 1, true);
     if (rc != 1) {
         return rc;
     }
@@ -188,6 +225,70 @@ static void t_burst_read(void) {
     report("burst read (6 bytes)", !all_same && !tail_ff, detail);
 }
 
+/* 8. Write to a read-only register.
+ *
+ * The chip id cannot be changed on a BMP280. Write to it, then read it back:
+ * it must still be the chip id. Whether the write itself was ACKed and ignored
+ * or NACKed differs between parts, so both pass; the detail says which, and
+ * against a real BMP280 that is how to find out what the real part does. */
+static void t_read_only_write(void) {
+    const uint8_t payload[2] = {REG_CHIP_ID, 0x00};
+    const int wrc = rig_write(payload, 2, false);
+    const bool acked = wrc == 2;
+    if (!acked && wrc != 1 && wrc != RIG_ERR_LATE_NACK) {
+        report("write to a read-only register", false, i2c_err(wrc, 2));
+        return;
+    }
+
+    uint8_t back = 0;
+    const int rc = read_regs(REG_CHIP_ID, &back, 1);
+    if (rc != 1) {
+        report("write to a read-only register", false, i2c_err(rc, 1));
+        return;
+    }
+
+    char detail[80];
+    snprintf(detail, sizeof detail, "write %s, chip id still 0x%02X",
+             acked ? "ACKed and ignored" : "NACKed", back);
+    report("write to a read-only register", back == EXPECT_CHIP_ID, detail);
+}
+
+/* 9. Burst write: two values in one transaction.
+ *
+ * Writes 0x27 then 0x10 starting at ctrl_meas, and reads two bytes back from
+ * there. Where the second value lands depends on the target: a pointer that
+ * moves on write puts it in the next register, one that does not overwrites
+ * the first. A real BMP280 takes writes as register/value pairs, so to it the
+ * second byte is a register number with no value, and nothing changes. All
+ * are legitimate, so this prints what came back, to compare with how the
+ * target is configured. Both registers are restored afterwards. */
+static void t_burst_write(void) {
+    const uint8_t payload[3] = {REG_CTRL_MEAS, 0x27, 0x10};
+    const int wrc = rig_write(payload, 3, false);
+    if (wrc != 3) {
+        report("burst write (2 bytes)", false, i2c_err(wrc, 3));
+        return;
+    }
+
+    uint8_t back[2] = {0};
+    const int rc = read_regs(REG_CTRL_MEAS, back, 2);
+
+    const uint8_t restore_meas[2] = {REG_CTRL_MEAS, 0x00};
+    const uint8_t restore_config[2] = {REG_CONFIG, 0x00};
+    rig_write(restore_meas, 2, false);
+    rig_write(restore_config, 2, false);
+
+    if (rc != 2) {
+        report("burst write (2 bytes)", false, i2c_err(rc, 2));
+        return;
+    }
+    char detail[80];
+    hex(detail, sizeof detail, back, 2);
+    strncat(detail, " (wrote 27 10 from 0xF4: where did 10 land?)",
+            sizeof detail - strlen(detail) - 1);
+    report("burst write (2 bytes)", true, detail);
+}
+
 /* 7. Burst read across the end of the register map.
  *
  * Four bytes from 0xFE run past the last register. What comes back depends on
@@ -217,7 +318,7 @@ static void t_register_write(void) {
     const uint8_t original_value = 0x00;
     uint8_t payload[2] = {REG_CTRL_MEAS, 0x27}; // oversampling x1, normal mode
 
-    int rc = i2c_write_timeout_us(I2C_PORT, TARGET_ADDR, payload, 2, false, TIMEOUT_US);
+    int rc = rig_write(payload, 2, false);
     if (rc != 2) {
         report("register write", false, i2c_err(rc, 2));
         return;
@@ -236,7 +337,7 @@ static void t_register_write(void) {
 
     // Leave the part as we found it, so a soak run does not drift its state.
     uint8_t restore[2] = {REG_CTRL_MEAS, original_value};
-    i2c_write_timeout_us(I2C_PORT, TARGET_ADDR, restore, 2, false, TIMEOUT_US);
+    rig_write(restore, 2, false);
 }
 
 /* 5. NACK handling.
@@ -305,6 +406,8 @@ static int run_once(bool verbose) {
     t_nack_on_absent_address();
     t_clock_stretch_tolerance();
     t_burst_across_end();
+    t_read_only_write();
+    t_burst_write();
 
     if (verbose) {
         printf("----------------------------------------------------------------\n");

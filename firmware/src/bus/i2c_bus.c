@@ -185,13 +185,31 @@ static void __not_in_flash_func(i2c_bus_handshake_isr)(void) {
         answer = i2c_slave_answer(true, bus->pc_rx);
         event = I2C_LOG_DATA_POINTER;
     } else {
-        /* Anything after it would be a register write, and there is nowhere
-         * to put it: the register map is read-only here. ACKing and
-         * discarding would be a lie the master cannot detect, so NACK and let
-         * it fail honestly. */
-        bus->active = I2C_BUS_NO_DEVICE;
-        answer = i2c_slave_answer(false, bus->pc_idle);
-        event = I2C_LOG_DATA_REFUSED;
+        /* A value for the register at the pointer. */
+        i2c_device_t *dev = &bus->devices[bus->active];
+        const uint8_t reg = dev->pointer;
+        const bool writable = reg < dev->reg_count && dev->reg_flags != NULL &&
+                              (dev->reg_flags[reg] & EMUWIRE_REGISTER_FLAGS_WRITABLE);
+        value = reg;
+        if (writable) {
+            dev->regs[reg] = byte;
+            dev->pointer = i2c_device_next(dev, reg, false);
+            answer = i2c_slave_answer(true, bus->pc_rx);
+            event = I2C_LOG_DATA_WRITTEN;
+        } else if (dev->flags & EMUWIRE_DEVICE_FLAGS_NACK_ON_RO_WRITE) {
+            /* This part refuses: the master sees a NACK and the transaction
+             * ends. */
+            bus->active = I2C_BUS_NO_DEVICE;
+            answer = i2c_slave_answer(false, bus->pc_idle);
+            event = I2C_LOG_DATA_REFUSED;
+        } else {
+            /* This part takes the byte and drops it, and its pointer moves on
+             * as if it had been stored. Not a lie to the master: it is what
+             * the real part does, and the log says so. */
+            dev->pointer = i2c_device_next(dev, reg, false);
+            answer = i2c_slave_answer(true, bus->pc_rx);
+            event = I2C_LOG_DATA_IGNORED;
+        }
     }
 
     /* Answer, and the master moves on. Everything after this line is after
@@ -257,7 +275,7 @@ emuwire_status_t i2c_bus_init(i2c_bus_t *bus, PIO pio, uint sm, uint pin_sda, ui
 }
 
 emuwire_status_t i2c_bus_attach(i2c_bus_t *bus, uint8_t addr, uint8_t device_id,
-                                const uint8_t *regs, uint16_t reg_count,
+                                uint8_t *regs, const uint8_t *reg_flags, uint16_t reg_count,
                                 uint8_t auto_increment, uint8_t flags) {
     if (bus == NULL || addr >= I2C_BUS_ADDR_COUNT || regs == NULL || reg_count == 0u ||
         reg_count > 256u || auto_increment > EMUWIRE_AUTO_INCREMENT_BOTH) {
@@ -277,6 +295,7 @@ emuwire_status_t i2c_bus_attach(i2c_bus_t *bus, uint8_t addr, uint8_t device_id,
     bus->devices[slot].addr = addr;
     bus->devices[slot].device_id = device_id;
     bus->devices[slot].regs = regs;
+    bus->devices[slot].reg_flags = reg_flags;
     bus->devices[slot].reg_count = reg_count;
     bus->devices[slot].pointer = 0;
     bus->devices[slot].auto_increment = auto_increment;

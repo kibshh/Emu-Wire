@@ -46,7 +46,7 @@
  * with writable registers and manifests behind it, comes later.
  */
 #define REG_CHIP_ID 0xD0
-static const uint8_t bmp280_regs[256] = {
+static uint8_t bmp280_regs[256] = {
     [REG_CHIP_ID] = 0x58,                          // what a BMP280 answers
     [0xF7] = 0x51, [0xF8] = 0x2C, [0xF9] = 0x80,   // pressure  msb, lsb, xlsb
     [0xFA] = 0x82, [0xFB] = 0x3A, [0xFC] = 0x00,   // temperature
@@ -55,6 +55,14 @@ static const uint8_t bmp280_regs[256] = {
     // on the last register (E0 E1 E1 E1).
     [0xFE] = 0xE0, [0xFF] = 0xE1, [0x00] = 0xE2, [0x01] = 0xE3,
 };
+
+// The registers a BMP280 lets the master write: reset, ctrl_meas, config.
+// Everything else is read-only.
+#define W EMUWIRE_REGISTER_FLAGS_WRITABLE
+static const uint8_t bmp280_flags[256] = {
+    [0xE0] = W, [0xF4] = W, [0xF5] = W,
+};
+#undef W
 
 static const char *mode_name(uint8_t mode) {
     switch (mode) {
@@ -84,16 +92,26 @@ static void core1_main(void) {
     }
 }
 
-// What a 4-byte burst from 0xFE should return under the current settings.
+// What the rig's tests 7 and 9 should read under the current settings.
 static void print_pointer_mode(void) {
     const i2c_device_t *dev = &g_bus.devices[0];
+    const uint8_t mode = dev->auto_increment;
     const bool wrap = (dev->flags & EMUWIRE_DEVICE_FLAGS_WRAP) != 0;
-    const bool moves = dev->auto_increment == EMUWIRE_AUTO_INCREMENT_ON_READ ||
-                       dev->auto_increment == EMUWIRE_AUTO_INCREMENT_BOTH;
-    printf("  pointer   auto-increment %s, %s at the end of the map\n",
-           mode_name(dev->auto_increment), wrap ? "wraps to 0x00" : "stays on 0xFF");
-    printf("            so a burst from 0xFE reads %s\n",
-           !moves ? "E0 E0 E0 E0" : wrap ? "E0 E1 E2 E3" : "E0 E1 E1 E1");
+    const bool on_read = mode == EMUWIRE_AUTO_INCREMENT_ON_READ || mode == EMUWIRE_AUTO_INCREMENT_BOTH;
+    const bool on_write = mode == EMUWIRE_AUTO_INCREMENT_ON_WRITE || mode == EMUWIRE_AUTO_INCREMENT_BOTH;
+
+    // Test 9 writes 27 10 from 0xF4, then reads 2 bytes back from 0xF4.
+    // Writes that move put 27 in F4 and 10 in F5; writes that stay leave 10
+    // in F4. Reads that move then return F4 F5; reads that stay return F4 F4.
+    const char *burst_write = on_write ? (on_read ? "27 10" : "27 27") : (on_read ? "10 00" : "10 10");
+
+    printf("  pointer   auto-increment %s, %s at the end of the map\n", mode_name(mode),
+           wrap ? "wraps to 0x00" : "stays on 0xFF");
+    printf("            rig test 7 (burst from 0xFE) should read %s\n",
+           !on_read ? "E0 E0 E0 E0" : wrap ? "E0 E1 E2 E3" : "E0 E1 E1 E1");
+    printf("            rig test 9 (burst write 27 10) should read back %s\n", burst_write);
+    printf("  writes    0xE0, 0xF4, 0xF5 writable; to any other register %s\n",
+           (dev->flags & EMUWIRE_DEVICE_FLAGS_NACK_ON_RO_WRITE) ? "NACKed" : "ACKed and ignored");
 }
 
 static void print_banner(void) {
@@ -103,9 +121,9 @@ static void print_banner(void) {
     printf("  pins      SDA = GP%d, SCL = GP%d\n", PIN_SDA, PIN_SDA + 1);
     printf("  device    0x%02X, a BMP280 register map (0x%02X reads 0x%02X)\n", OUR_ADDR,
            REG_CHIP_ID, bmp280_regs[REG_CHIP_ID]);
-    printf("  writes    refused: the map is read-only for now\n");
     print_pointer_mode();
-    printf("  keys      a = next auto-increment mode, w = toggle wrap\n");
+    printf("  keys      a = next auto-increment mode, w = toggle wrap,\n");
+    printf("            n = toggle NACK on read-only writes\n");
     printf("  core 1    serving the bus\n");
 #if I2C_BUS_VERBOSE
     printf("  log       every call on the bus, as it happens (verbose build)\n\n");
@@ -141,8 +159,14 @@ static void print_entry(uint32_t entry) {
     case I2C_LOG_DATA_POINTER:
         printf("                pointer set to 0x%02X\n", byte);
         break;
+    case I2C_LOG_DATA_WRITTEN:
+        printf("                wrote 0x%02X to register 0x%02X\n", byte, value);
+        break;
+    case I2C_LOG_DATA_IGNORED:
+        printf("                0x%02X to register 0x%02X ignored (read-only)\n", byte, value);
+        break;
     case I2C_LOG_DATA_REFUSED:
-        printf("                then 0x%02X -> NACK (the map is read-only)\n", byte);
+        printf("                0x%02X to register 0x%02X -> NACK (read-only)\n", byte, value);
         break;
     case I2C_LOG_DATA_STRAY:
         printf("  data 0x%02X outside any transaction -> NACK\n", byte);
@@ -198,8 +222,11 @@ int main(void) {
     emuwire_status_t st = i2c_bus_init(&g_bus, pio0, 0, PIN_SDA, BUS_HZ);
     if (st == EMUWIRE_STATUS_OK) {
         // Like a real BMP280: the pointer moves on after each byte read.
-        st = i2c_bus_attach(&g_bus, OUR_ADDR, OUR_DEVICE_ID, bmp280_regs, sizeof bmp280_regs,
-                            EMUWIRE_AUTO_INCREMENT_ON_READ, EMUWIRE_DEVICE_FLAGS_WRAP);
+        // Read-only writes are ignored rather than NACKed. Which one a real
+        // BMP280 does is what rig test 8 shows; set this to match it.
+        st = i2c_bus_attach(&g_bus, OUR_ADDR, OUR_DEVICE_ID, bmp280_regs, bmp280_flags,
+                            sizeof bmp280_regs, EMUWIRE_AUTO_INCREMENT_ON_READ,
+                            EMUWIRE_DEVICE_FLAGS_WRAP);
     }
 
     // Only start the bus if it is set up. A state machine that stretches with
@@ -254,12 +281,14 @@ int main(void) {
         // The device's mode is read by core 1 on every byte; a single-byte
         // store here is seen there whole.
         const int key = getchar_timeout_us(0);
-        if (key == 'a' || key == 'w') {
+        if (key == 'a' || key == 'w' || key == 'n') {
             i2c_device_t *dev = &g_bus.devices[0];
             if (key == 'a') {
                 dev->auto_increment = (uint8_t)((dev->auto_increment + 1u) % 4u);
-            } else {
+            } else if (key == 'w') {
                 dev->flags ^= EMUWIRE_DEVICE_FLAGS_WRAP;
+            } else {
+                dev->flags ^= EMUWIRE_DEVICE_FLAGS_NACK_ON_RO_WRITE;
             }
             printf("\n");
             print_pointer_mode();
