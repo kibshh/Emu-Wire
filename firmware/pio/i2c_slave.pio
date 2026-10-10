@@ -184,6 +184,7 @@ dispatch:
 ; either. Nothing is shifted into the ISR until the bit is known to be real,
 ; so a reframe never leaves half a byte behind.
 public rx_path:
+    mov osr, null                   ; let go of SDA for every bit, whatever the answer held
     wait 1 jmppin
     mov y, pins                     ; SDA at the rising edge (IN count masks it to one bit)
 rx_watch:
@@ -285,8 +286,9 @@ static inline void i2c_slave_program_init(PIO pio, uint sm, uint offset, uint pi
  *               plus the offset the program was loaded at. Ignored on a NACK,
  *               which always goes idle.
  *   bits 25:18  the byte to send, inverted, because OUT writes PINDIRS where
- *               1 means "pull low". Must be zero otherwise: when receiving,
- *               the loop shifts these bits out, and zero means "let go".
+ *               1 means "pull low". Ignored otherwise: rx_path clears the
+ *               OSR before receiving, so a stray byte here cannot drive the
+ *               master's data bits.
  */
 static inline uint32_t i2c_slave_answer(bool ack, uint continue_at) {
     return ((uint32_t)(ack ? 1u : 0u) << 31) | ((uint32_t)(continue_at & 0x1fu) << 26);
