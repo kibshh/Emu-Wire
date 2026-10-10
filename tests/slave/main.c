@@ -50,7 +50,24 @@ static const uint8_t bmp280_regs[256] = {
     [REG_CHIP_ID] = 0x58,                          // what a BMP280 answers
     [0xF7] = 0x51, [0xF8] = 0x2C, [0xF9] = 0x80,   // pressure  msb, lsb, xlsb
     [0xFA] = 0x82, [0xFB] = 0x3A, [0xFC] = 0x00,   // temperature
+    // Markers either side of the end of the map, not BMP280 values: a burst
+    // from 0xFE shows whether the pointer wraps (E0 E1 E2 E3) or saturates
+    // on the last register (E0 E1 E1 E1).
+    [0xFE] = 0xE0, [0xFF] = 0xE1, [0x00] = 0xE2, [0x01] = 0xE3,
 };
+
+static const char *mode_name(uint8_t mode) {
+    switch (mode) {
+    case EMUWIRE_AUTO_INCREMENT_NONE:
+        return "none";
+    case EMUWIRE_AUTO_INCREMENT_ON_READ:
+        return "on read";
+    case EMUWIRE_AUTO_INCREMENT_ON_WRITE:
+        return "on write";
+    default:
+        return "on read and write";
+    }
+}
 
 static i2c_bus_t g_bus;
 
@@ -67,6 +84,18 @@ static void core1_main(void) {
     }
 }
 
+// What a 4-byte burst from 0xFE should return under the current settings.
+static void print_pointer_mode(void) {
+    const i2c_device_t *dev = &g_bus.devices[0];
+    const bool wrap = (dev->flags & EMUWIRE_DEVICE_FLAGS_WRAP) != 0;
+    const bool moves = dev->auto_increment == EMUWIRE_AUTO_INCREMENT_ON_READ ||
+                       dev->auto_increment == EMUWIRE_AUTO_INCREMENT_BOTH;
+    printf("  pointer   auto-increment %s, %s at the end of the map\n",
+           mode_name(dev->auto_increment), wrap ? "wraps to 0x00" : "stays on 0xFF");
+    printf("            so a burst from 0xFE reads %s\n",
+           !moves ? "E0 E0 E0 E0" : wrap ? "E0 E1 E2 E3" : "E0 E1 E1 E1");
+}
+
 static void print_banner(void) {
     printf("\nEmuWire PIO I2C slave\n");
     printf("  program   %d of 32 PIO instructions, loaded at offset %u\n",
@@ -75,6 +104,8 @@ static void print_banner(void) {
     printf("  device    0x%02X, a BMP280 register map (0x%02X reads 0x%02X)\n", OUR_ADDR,
            REG_CHIP_ID, bmp280_regs[REG_CHIP_ID]);
     printf("  writes    refused: the map is read-only for now\n");
+    print_pointer_mode();
+    printf("  keys      a = next auto-increment mode, w = toggle wrap\n");
     printf("  core 1    serving the bus\n");
 #if I2C_BUS_VERBOSE
     printf("  log       every call on the bus, as it happens (verbose build)\n\n");
@@ -93,7 +124,13 @@ static void print_entry(uint32_t entry) {
 
     switch ((i2c_log_event_t)I2C_LOG_EVENT(entry)) {
     case I2C_LOG_ADDR_READ:
-        printf("  0x%02X %-5s -> ACK, sent 0x%02X\n", byte >> 1, dir, value);
+        printf("  0x%02X %-5s -> ACK\n", byte >> 1, dir);
+        break;
+    case I2C_LOG_TX_SENT:
+        printf("                sent 0x%02X (register 0x%02X)\n", byte, value);
+        break;
+    case I2C_LOG_TX_MISMATCH:
+        printf("                sent 0x%02X, but the bus carried 0x%02X\n", value, byte);
         break;
     case I2C_LOG_ADDR_WRITE:
         printf("  0x%02X %-5s -> ACK\n", byte >> 1, dir);
@@ -130,11 +167,12 @@ static void drain_log(void) {
 // Failures, counted in every build. None of them can happen while the
 // handshake behaves; each means the bus was held low, or still is.
 typedef struct {
-    uint32_t stray, no_addr, blocked;
+    uint32_t stray, no_addr, blocked, mismatch;
 } problems_t;
 
 static void report_problems(problems_t *seen) {
-    const problems_t now = {g_bus.nacked_stray, g_bus.no_address, g_bus.tx_blocked};
+    const problems_t now = {g_bus.nacked_stray, g_bus.no_address, g_bus.tx_blocked,
+                            g_bus.tx_mismatch};
     if (now.stray != seen->stray) {
         printf("  !! PROBLEM: %lu data bytes arrived outside any transaction\n",
                (unsigned long)(now.stray - seen->stray));
@@ -147,6 +185,10 @@ static void report_problems(problems_t *seen) {
         printf("  !! PROBLEM: %lu handshakes with no room to answer: the bus may be stuck\n",
                (unsigned long)(now.blocked - seen->blocked));
     }
+    if (now.mismatch != seen->mismatch) {
+        printf("  !! PROBLEM: %lu bytes sent read back different: something else drove SDA\n",
+               (unsigned long)(now.mismatch - seen->mismatch));
+    }
     *seen = now;
 }
 
@@ -155,7 +197,9 @@ int main(void) {
 
     emuwire_status_t st = i2c_bus_init(&g_bus, pio0, 0, PIN_SDA, BUS_HZ);
     if (st == EMUWIRE_STATUS_OK) {
-        st = i2c_bus_attach(&g_bus, OUR_ADDR, OUR_DEVICE_ID, bmp280_regs, sizeof bmp280_regs);
+        // Like a real BMP280: the pointer moves on after each byte read.
+        st = i2c_bus_attach(&g_bus, OUR_ADDR, OUR_DEVICE_ID, bmp280_regs, sizeof bmp280_regs,
+                            EMUWIRE_AUTO_INCREMENT_ON_READ, EMUWIRE_DEVICE_FLAGS_WRAP);
     }
 
     // Only start the bus if it is set up. A state machine that stretches with
@@ -187,7 +231,7 @@ int main(void) {
 
     print_banner();
 
-    problems_t problems = {0, 0, 0};
+    problems_t problems = {0, 0, 0, 0};
     bool was_connected = true;
 #if I2C_BUS_VERBOSE
     uint32_t dropped_seen = 0;
@@ -206,6 +250,21 @@ int main(void) {
         }
 #endif
         report_problems(&problems);
+
+        // The device's mode is read by core 1 on every byte; a single-byte
+        // store here is seen there whole.
+        const int key = getchar_timeout_us(0);
+        if (key == 'a' || key == 'w') {
+            i2c_device_t *dev = &g_bus.devices[0];
+            if (key == 'a') {
+                dev->auto_increment = (uint8_t)((dev->auto_increment + 1u) % 4u);
+            } else {
+                dev->flags ^= EMUWIRE_DEVICE_FLAGS_WRAP;
+            }
+            printf("\n");
+            print_pointer_mode();
+            printf("\n");
+        }
 
         // Reopening the serial port otherwise shows a blank screen, with no
         // way to tell a running slave from a dead one.

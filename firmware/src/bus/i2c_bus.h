@@ -50,12 +50,14 @@
 #define I2C_BUS_LOG_SIZE 64u /* power of two: the index is a mask */
 
 typedef enum {
-    I2C_LOG_ADDR_READ = 1,   /* address with read: ACKed, value = byte sent */
+    I2C_LOG_ADDR_READ = 1,   /* address with read: ACKed */
     I2C_LOG_ADDR_WRITE,      /* address with write: ACKed */
     I2C_LOG_ADDR_UNKNOWN,    /* no device at the address: NACKed */
     I2C_LOG_DATA_POINTER,    /* first data byte: taken as the register pointer */
     I2C_LOG_DATA_REFUSED,    /* a later data byte: NACKed, the map is read-only */
     I2C_LOG_DATA_STRAY,      /* a data byte outside any transaction: NACKed */
+    I2C_LOG_TX_SENT,         /* a byte went out: byte = what the bus carried, value = its register */
+    I2C_LOG_TX_MISMATCH,     /* the bus carried something else: byte = the bus, value = ours */
 } i2c_log_event_t;
 
 #define I2C_LOG_EVENT(e) ((uint8_t)((e) & 0xFFu))
@@ -67,8 +69,8 @@ typedef struct {
     uint8_t device_id;
 
     /* The register map, owned by the caller and never written here. The real
-     * device model — writable registers, auto-increment, per-register flags —
-     * arrives with the regmap; this is enough to answer a read. */
+     * device model — writable registers, per-register flags — arrives with the
+     * regmap; this is enough to answer a read. */
     const uint8_t *regs;
     uint16_t reg_count;
 
@@ -76,6 +78,14 @@ typedef struct {
      * after the address, which is how every register-addressed part works.
      * Written by the IRQ handler. */
     volatile uint8_t pointer;
+
+    /* How the pointer moves after each byte: an emuwire_auto_increment_t.
+     * ON_READ is what most sensors do. */
+    volatile uint8_t auto_increment;
+
+    /* emuwire_device_flags. WRAP decides the end of the map: set, the pointer
+     * rolls to register 0; clear, it stays on the last register. */
+    volatile uint8_t flags;
 } i2c_device_t;
 
 typedef struct {
@@ -95,9 +105,12 @@ typedef struct {
     uint8_t device_count;
     uint8_t index[I2C_BUS_ADDR_COUNT]; /* address -> slot, or I2C_BUS_NO_DEVICE */
 
-    /* The transaction in progress. Both are owned by the IRQ handler. */
+    /* The transaction in progress. All owned by the IRQ handler. */
     volatile uint8_t active;     /* slot being addressed, or I2C_BUS_NO_DEVICE */
+    volatile bool reading;       /* the master is reading from it */
     volatile uint8_t data_bytes; /* data bytes taken since the address */
+    volatile uint8_t tx_reg;     /* the register of the byte being sent */
+    volatile uint8_t tx_byte;    /* the byte being sent, to check its echo */
 
 #if I2C_BUS_VERBOSE
     /* The transaction log — see I2C_BUS_LOG_SIZE. Written after the answer is
@@ -114,6 +127,7 @@ typedef struct {
     volatile uint32_t nacked_stray;    /* a data byte outside any transaction */
     volatile uint32_t no_address;      /* handshake IRQ with an empty RX FIFO */
     volatile uint32_t tx_blocked;      /* no room to answer: the bus will hang */
+    volatile uint32_t tx_mismatch;     /* a byte sent read back different: something else drove SDA */
 } i2c_bus_t;
 
 /* Claim a state machine and load the program. SDA and SCL must be
@@ -131,9 +145,13 @@ emuwire_status_t i2c_bus_init(i2c_bus_t *bus, PIO pio, uint sm, uint pin_sda, ui
  * owns and keeps alive. Rejects reserved addresses and an address that is
  * already taken: two devices at one address is a wiring fault that answers
  * with the bitwise AND of both, which is never what a test meant to set up.
+ *
+ * auto_increment is an emuwire_auto_increment_t; flags are
+ * emuwire_device_flags (WRAP is the one used so far).
  */
 emuwire_status_t i2c_bus_attach(i2c_bus_t *bus, uint8_t addr, uint8_t device_id,
-                                const uint8_t *regs, uint16_t reg_count);
+                                const uint8_t *regs, uint16_t reg_count,
+                                uint8_t auto_increment, uint8_t flags);
 
 /* Install the handshake IRQ handler and start the state machine.
  *

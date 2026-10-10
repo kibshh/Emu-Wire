@@ -39,9 +39,25 @@ static __force_inline void i2c_bus_log(i2c_bus_t *bus, i2c_log_event_t event, ui
 }
 #endif
 
-static inline uint8_t i2c_device_read(const i2c_device_t *dev) {
-    const uint8_t pointer = dev->pointer;
-    return (pointer < dev->reg_count) ? dev->regs[pointer] : I2C_BUS_UNMAPPED_READ;
+static inline uint8_t i2c_device_read(const i2c_device_t *dev, uint8_t reg) {
+    return (reg < dev->reg_count) ? dev->regs[reg] : I2C_BUS_UNMAPPED_READ;
+}
+
+/* The register after `reg`, for a byte just read or written. Whether the
+ * pointer moves at all depends on the device's auto-increment mode; at the
+ * end of the map it rolls to 0 with WRAP, and otherwise stays put. */
+static inline uint8_t i2c_device_next(const i2c_device_t *dev, uint8_t reg, bool was_read) {
+    const uint8_t mode = dev->auto_increment;
+    const bool moves = (mode == EMUWIRE_AUTO_INCREMENT_BOTH) ||
+                       (mode == (was_read ? EMUWIRE_AUTO_INCREMENT_ON_READ
+                                          : EMUWIRE_AUTO_INCREMENT_ON_WRITE));
+    if (!moves) {
+        return reg;
+    }
+    if ((uint32_t)reg + 1u < dev->reg_count) {
+        return (uint8_t)(reg + 1u);
+    }
+    return (dev->flags & EMUWIRE_DEVICE_FLAGS_WRAP) ? 0u : reg;
 }
 
 /*
@@ -70,13 +86,14 @@ static void __not_in_flash_func(i2c_bus_handshake_isr)(void) {
         return;
     }
 
-    /* Flag 4 + sm is not an interrupt; it is a label the receive path puts on
-     * the byte. Set means data, clear means an address — including after a
-     * repeated START, which the program handles without telling anyone. */
-    const uint data_flag = I2C_SLAVE_MARK_DATA + sm;
-    const bool is_data = pio_interrupt_get(pio, data_flag);
-    if (is_data) {
-        pio_interrupt_clear(pio, data_flag);
+    /* Flag 4 + sm is not an interrupt; it is a label set at every START. Set
+     * means this byte is an address. Clear means it belongs to the
+     * transaction in progress: data the master wrote, or the echo of a byte
+     * we sent — `reading` says which. */
+    const uint address_flag = I2C_SLAVE_MARK_ADDRESS + sm;
+    const bool is_address = pio_interrupt_get(pio, address_flag);
+    if (is_address) {
+        pio_interrupt_clear(pio, address_flag);
     }
     pio_interrupt_clear(pio, sm);
 
@@ -88,11 +105,11 @@ static void __not_in_flash_func(i2c_bus_handshake_isr)(void) {
     }
 
     if (pio_sm_is_rx_fifo_empty(pio, sm)) {
-        /* The program pushes the byte before raising the IRQ, so this cannot
+        /* Every handshake follows eight bits and an autopush, so this cannot
          * happen. NACK anyway: releasing the bus beats holding it. */
         bus->no_address++;
         bus->active = I2C_BUS_NO_DEVICE;
-        pio_sm_put(pio, sm, i2c_slave_answer(false, bus->pc_idle, 0));
+        pio_sm_put(pio, sm, i2c_slave_answer(false, bus->pc_idle));
         return;
     }
 
@@ -109,56 +126,72 @@ static void __not_in_flash_func(i2c_bus_handshake_isr)(void) {
     i2c_log_event_t event;
     uint8_t value = 0;
 
-    if (!is_data) {
+    if (is_address) {
         const uint8_t addr = (uint8_t)(byte >> 1);
-        const bool is_read = (byte & 1u) != 0u;
-
         const uint8_t slot = bus->index[addr]; /* O(1): one load, no scan */
         if (slot == I2C_BUS_NO_DEVICE) {
             bus->active = I2C_BUS_NO_DEVICE;
-            answer = i2c_slave_answer(false, bus->pc_idle, 0);
+            answer = i2c_slave_answer(false, bus->pc_idle);
             event = I2C_LOG_ADDR_UNKNOWN;
         } else {
+            i2c_device_t *dev = &bus->devices[slot];
             bus->active = slot;
             bus->data_bytes = 0;
-            if (is_read) {
+            bus->reading = (byte & 1u) != 0u;
+            if (bus->reading) {
                 /* Read from wherever the pointer was left — by a pointer write
                  * just before this, or by the transaction before that. A part
-                 * that has never been pointed anywhere reads register 0. */
-                value = i2c_device_read(&bus->devices[slot]);
-                answer = i2c_slave_answer(true, bus->pc_tx, value);
+                 * that has never been pointed anywhere reads register 0. The
+                 * pointer only moves once the byte has really gone out. */
+                bus->tx_reg = dev->pointer;
+                bus->tx_byte = i2c_device_read(dev, bus->tx_reg);
+                answer = i2c_slave_answer_send(true, bus->pc_tx, bus->tx_byte);
                 event = I2C_LOG_ADDR_READ;
             } else {
-                answer = i2c_slave_answer(true, bus->pc_rx, 0);
+                answer = i2c_slave_answer(true, bus->pc_rx);
                 event = I2C_LOG_ADDR_WRITE;
             }
         }
-    } else {
-        /* A data byte: the master is writing. */
-        const uint8_t slot = bus->active;
-        if (slot == I2C_BUS_NO_DEVICE) {
-            /* No transaction owns this byte. Reachable only if a byte was cut
-             * short mid-flight, leaving the marker set; the next address
-             * recovers it. Counted so a run of these is visible rather than
-             * mysterious. */
-            bus->nacked_stray++;
-            answer = i2c_slave_answer(false, bus->pc_idle, 0);
-            event = I2C_LOG_DATA_STRAY;
-        } else if (bus->data_bytes == 0) {
-            /* The first byte after a write address is the register pointer. */
-            bus->devices[slot].pointer = byte;
-            bus->data_bytes = 1;
-            answer = i2c_slave_answer(true, bus->pc_rx, 0);
-            event = I2C_LOG_DATA_POINTER;
+    } else if (bus->active == I2C_BUS_NO_DEVICE) {
+        /* No transaction owns this byte. A START always marks the next byte
+         * as an address, so this needs a master that ignored a NACK. Counted
+         * so it is visible rather than mysterious. */
+        bus->nacked_stray++;
+        answer = i2c_slave_answer(false, bus->pc_idle);
+        event = I2C_LOG_DATA_STRAY;
+    } else if (bus->reading) {
+        /* The echo of a byte we sent: what was actually on the bus. It went
+         * out, so the pointer moves past it now. Then offer the next one; the
+         * ACK bit is clear, so the master answers on the ninth clock — ACK for
+         * more, NACK to stop — and the program acts on that by itself. A
+         * byte offered and not taken never moved the pointer. */
+        i2c_device_t *dev = &bus->devices[bus->active];
+        if (byte != bus->tx_byte) {
+            bus->tx_mismatch++;
+            event = I2C_LOG_TX_MISMATCH;
+            value = bus->tx_byte;
         } else {
-            /* Anything after it would be a register write, and there is
-             * nowhere to put it: the register map is read-only here. ACKing
-             * and discarding would be a lie the master cannot detect, so NACK
-             * and let it fail honestly. */
-            bus->active = I2C_BUS_NO_DEVICE;
-            answer = i2c_slave_answer(false, bus->pc_idle, 0);
-            event = I2C_LOG_DATA_REFUSED;
+            event = I2C_LOG_TX_SENT;
+            value = bus->tx_reg;
         }
+        dev->pointer = i2c_device_next(dev, bus->tx_reg, true);
+        bus->tx_reg = dev->pointer;
+        bus->tx_byte = i2c_device_read(dev, bus->tx_reg);
+        answer = i2c_slave_answer_send(false, bus->pc_tx, bus->tx_byte);
+    } else if (bus->data_bytes == 0) {
+        /* The first byte after a write address is the register pointer. */
+        bus->devices[bus->active].pointer = byte;
+        bus->data_bytes = 1;
+        answer = i2c_slave_answer(true, bus->pc_rx);
+        event = I2C_LOG_DATA_POINTER;
+    } else {
+        /* Anything after it would be a register write, and there is nowhere
+         * to put it: the register map is read-only here. ACKing and
+         * discarding would be a lie the master cannot detect, so NACK and let
+         * it fail honestly. */
+        bus->active = I2C_BUS_NO_DEVICE;
+        answer = i2c_slave_answer(false, bus->pc_idle);
+        event = I2C_LOG_DATA_REFUSED;
     }
 
     /* Answer, and the master moves on. Everything after this line is after
@@ -168,7 +201,8 @@ static void __not_in_flash_func(i2c_bus_handshake_isr)(void) {
 #if I2C_BUS_VERBOSE
     i2c_bus_log(bus, event, byte, value);
 #else
-    (void)event; /* only the log needs it */
+    (void)event; /* only the log needs them */
+    (void)value;
 #endif
 }
 
@@ -192,6 +226,7 @@ emuwire_status_t i2c_bus_init(i2c_bus_t *bus, PIO pio, uint sm, uint pin_sda, ui
     }
     bus->device_count = 0;
     bus->active = I2C_BUS_NO_DEVICE;
+    bus->reading = false;
     bus->data_bytes = 0;
 #if I2C_BUS_VERBOSE
     bus->log_head = 0;
@@ -201,6 +236,7 @@ emuwire_status_t i2c_bus_init(i2c_bus_t *bus, PIO pio, uint sm, uint pin_sda, ui
     bus->nacked_stray = 0;
     bus->no_address = 0;
     bus->tx_blocked = 0;
+    bus->tx_mismatch = 0;
 
     bus->pio = pio;
     bus->sm = sm;
@@ -212,7 +248,7 @@ emuwire_status_t i2c_bus_init(i2c_bus_t *bus, PIO pio, uint sm, uint pin_sda, ui
      * than adding the offset in the IRQ path. */
     bus->pc_idle = bus->offset + i2c_slave_offset_idle;
     bus->pc_rx = bus->offset + i2c_slave_offset_rx_path;
-    bus->pc_tx = bus->offset + i2c_slave_offset_tx_path;
+    bus->pc_tx = bus->offset + i2c_slave_offset_byte_loop;
 
     i2c_slave_program_init(pio, sm, bus->offset, pin_sda, bus_hz);
 
@@ -221,8 +257,10 @@ emuwire_status_t i2c_bus_init(i2c_bus_t *bus, PIO pio, uint sm, uint pin_sda, ui
 }
 
 emuwire_status_t i2c_bus_attach(i2c_bus_t *bus, uint8_t addr, uint8_t device_id,
-                                const uint8_t *regs, uint16_t reg_count) {
-    if (bus == NULL || addr >= I2C_BUS_ADDR_COUNT || regs == NULL || reg_count == 0u) {
+                                const uint8_t *regs, uint16_t reg_count,
+                                uint8_t auto_increment, uint8_t flags) {
+    if (bus == NULL || addr >= I2C_BUS_ADDR_COUNT || regs == NULL || reg_count == 0u ||
+        reg_count > 256u || auto_increment > EMUWIRE_AUTO_INCREMENT_BOTH) {
         return EMUWIRE_STATUS_ERR_BAD_PARAM;
     }
     if (addr <= I2C_ADDR_RESERVED_LOW || addr >= I2C_ADDR_RESERVED_HIGH) {
@@ -241,6 +279,8 @@ emuwire_status_t i2c_bus_attach(i2c_bus_t *bus, uint8_t addr, uint8_t device_id,
     bus->devices[slot].regs = regs;
     bus->devices[slot].reg_count = reg_count;
     bus->devices[slot].pointer = 0;
+    bus->devices[slot].auto_increment = auto_increment;
+    bus->devices[slot].flags = flags;
 
     /* Published last: the IRQ handler reads the index, so the slot it points
      * at must already be complete. */
@@ -263,8 +303,9 @@ emuwire_status_t i2c_bus_start(i2c_bus_t *bus) {
         return EMUWIRE_STATUS_ERR_INTERNAL;
     }
 
-    /* Only the handshake flag reaches the CPU. The data marker lives in flags
-     * 4-7, which cannot raise an interrupt, and is read inside the handler. */
+    /* Only the handshake flag reaches the CPU. The address marker lives in
+     * flags 4-7, which cannot raise an interrupt, and is read inside the
+     * handler. */
     pio_set_irq0_source_enabled(bus->pio, (pio_interrupt_source_t)(pis_interrupt0 + bus->sm),
                                 true);
     irq_set_exclusive_handler((uint)irq, i2c_bus_handshake_isr);

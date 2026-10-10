@@ -46,6 +46,7 @@
 
 #define EXPECT_CHIP_ID 0x58 // 0x58 = BMP280. 0x60 = BME280, a different part.
 #define BURST_LEN 6         // press[3] + temp[3]
+#define REG_END_OF_MAP 0xFE // 2 registers before the 8-bit pointer runs out
 
 // Generous, because a slave may legitimately stretch the clock. The emulator
 // stretches on every address match — that is the mechanism that lets one state
@@ -182,7 +183,29 @@ static void t_burst_read(void) {
         strncat(detail, " (only the first byte is real: the rest is an idle bus)",
                 sizeof detail - strlen(detail) - 1);
     }
-    report("burst read (6 bytes)", true, detail);
+    // Either one means the target did not send six registers: a real BMP280
+    // does neither.
+    report("burst read (6 bytes)", !all_same && !tail_ff, detail);
+}
+
+/* 7. Burst read across the end of the register map.
+ *
+ * Four bytes from 0xFE run past the last register. What comes back depends on
+ * the target: a pointer that wraps reads 0xFE, 0xFF, 0x00, 0x01, one that
+ * saturates reads 0xFE, 0xFF, 0xFF, 0xFF. Neither is wrong in general, so this
+ * only checks the transfer completes and prints the bytes, to compare with
+ * how the target is configured. */
+static void t_burst_across_end(void) {
+    uint8_t buf[4] = {0};
+    int rc = read_regs(REG_END_OF_MAP, buf, (int)sizeof buf);
+    if (rc != (int)sizeof buf) {
+        report("burst across the end of the map", false, i2c_err(rc, (int)sizeof buf));
+        return;
+    }
+    char detail[80];
+    hex(detail, sizeof detail, buf, (int)sizeof buf);
+    strncat(detail, " (from 0xFE: wrap or saturate?)", sizeof detail - strlen(detail) - 1);
+    report("burst across the end of the map", true, detail);
 }
 
 /* 4. Register write, read back.
@@ -281,6 +304,7 @@ static int run_once(bool verbose) {
     t_register_write();
     t_nack_on_absent_address();
     t_clock_stretch_tolerance();
+    t_burst_across_end();
 
     if (verbose) {
         printf("----------------------------------------------------------------\n");
