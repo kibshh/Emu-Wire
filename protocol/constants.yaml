@@ -1,0 +1,68 @@
+# Named sentinel values
+#
+# Part of the EmuWire protocol spec. Entry point: protocol/protocol.yaml
+#
+# Every reserved magic number lives here so codegen can emit a named constant
+# for C and Python. Nobody should ever type 0xFF and hope the reader knows
+# which of five meanings applies.
+#
+# Several share a value. That is deliberate, not redundancy — DEV_ID_ALL and
+# DEV_ID_NONE are both 0xFF but mean opposite things, and a reader seeing the
+# bare number cannot tell which is intended.
+
+constants:
+
+  # --- pins ---------------------------------------------------------------
+  PIN_UNUSED:
+    type: u8
+    value: 0xFF
+    description: >
+      Sent in a BUS_CREATE pin field that the chosen protocol does not use —
+      I2C has no MISO or CS, so both are PIN_UNUSED. Each bus file declares
+      which of its pin fields carry a signal and which are unused.
+
+  # --- wildcards: "apply to all" -------------------------------------------
+  DEV_ID_ALL:
+    type: u8
+    value: 0xFF
+    description: "In a request, address every device on the bus rather than one."
+
+  FAULT_ID_ALL:
+    type: u8
+    value: 0xFF
+    description: "In FAULT_CLEAR, clear every fault on the device."
+
+  # --- absence: "not applicable" -------------------------------------------
+  DEV_ID_NONE:
+    type: u8
+    value: 0xFF
+    description: "In a report, no device matched. Distinct in meaning from DEV_ID_ALL despite sharing a value."
+
+  MSG_TYPE_NONE:
+    type: u8
+    value: 0x00
+    description: >
+      In EVT_ERROR.context_type, the error was not caused by any message.
+      No message uses id 0x00, so this cannot collide with a real one.
+
+  BUS_ID_NONE:
+    type: u8
+    value: 0xFF
+    description: "In EVT_ERROR, the error is not specific to a bus."
+
+  # --- scope ---------------------------------------------------------------
+  REG_ANY:
+    type: u16
+    value: 0xFFFF
+    description: >
+      In FAULT_SET.trigger_reg, count accesses to any register rather than one.
+      Known limit: a 16-bit register map could in principle use 0xFFFF as a
+      real address, and such a register cannot be singled out as a trigger.
+      No part in the v1 catalogue does, and the manifest linter warns if one
+      appears.
+
+  # --- counts --------------------------------------------------------------
+  FAULT_REPEAT_UNLIMITED:
+    type: u16
+    value: 0xFFFF
+    description: "A fault that never auto-clears. It fires until explicitly cleared."

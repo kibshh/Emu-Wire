@@ -1,0 +1,96 @@
+# ---------------------------------------------------------------------------
+# Tracked on purpose — do not add ignore rules for these:
+#
+#   firmware/pio/*.pio              PIO assembly SOURCE. Many embedded
+#                                   .gitignore templates carry a `.pio` rule
+#                                   for PlatformIO's build dir. Adding one here
+#                                   would silently drop the core of the product.
+#   firmware/src/protocol/messages.h  Generated, but COMMITTED — the CI drift
+#   sdk/emuwire/protocol.py           check compares regenerated output against
+#                                   what is in the tree. Ignoring them disables
+#                                   the check.
+#   firmware/pico_sdk_import.cmake  Required to build.
+# ---------------------------------------------------------------------------
+
+# Build output
+build/
+build-*/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+*.o
+*.a
+*.d
+*.elf
+*.bin
+*.hex
+*.dis
+*.map
+
+# Firmware images. Released as GitHub release assets, never committed.
+*.uf2
+
+# pico-sdk
+pico_sdk_import.cmake.bak
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Docs site build output (MkDocs)
+site/
+
+# Secrets. Nothing here is ever a false positive worth relaxing.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+.pypirc
+stripe_*.json
+*licence-token*
+*license-token*
+
+# ---------------------------------------------------------------------------
+# Bench captures and verification artefacts
+#
+# Analyzer captures are large binaries and mostly disposable.
+#
+# Golden traces are NOT disposable — they are the evidence behind a verified
+# manifest, and the corpus is the moat. Before wiring up the CI verification
+# regression, decide where goldens live: goldens for free/core manifests can be
+# public, but goldens backing paid verified manifests must not land in a public
+# repo. Until that is decided, keep them out.
+# ---------------------------------------------------------------------------
+*.sr
+*.logicdata
+*.sal
+captures/
+tests/verification/golden/
+tests/verification/out/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Claude Code local overrides
+.claude/settings.local.json
+
+# Additional local-only paths are handled in .git/info/exclude, which is not
+# committed. On a fresh clone or a second machine, re-apply them there.

@@ -1,0 +1,101 @@
+name: python
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint and type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install linters
+        run: pip install --upgrade ruff mypy
+
+      # Lint whatever Python exists, wherever it lives — protocol/codegen.py
+      # arrives before the SDK package does, and it should be linted from day
+      # one rather than when someone remembers to add its path here.
+      - name: Detect Python sources
+        id: py
+        run: |
+          if find . -name '*.py' -not -path './.git/*' | grep -q .; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Python checks skipped::No .py files in the tree yet. This job runs for real once there are."
+          fi
+
+      - name: ruff check
+        if: steps.py.outputs.present == 'true'
+        run: ruff check --output-format=github .
+
+      - name: ruff format --check
+        if: steps.py.outputs.present == 'true'
+        run: ruff format --check --diff .
+
+      - name: mypy
+        if: steps.py.outputs.present == 'true'
+        run: mypy .
+
+  test:
+    name: unit tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 is the floor the SDK promises, so it is tested explicitly — a
+        # 3.10-only syntax slip is easy to make and invisible on a modern
+        # interpreter. 3.13 catches deprecations early.
+        python-version: ["3.9", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Gate on whether there are tests, not on whether the SDK is a package.
+      # The suite runs with nothing installed — conftest puts sdk/ and
+      # protocol/ on the path itself — so requiring a pyproject.toml here
+      # would skip a working suite until packaging lands.
+      - name: Detect tests
+        id: tests
+        run: |
+          if find sdk/tests -name 'test_*.py' 2>/dev/null | grep -q .; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=No unit tests found::sdk/tests holds no test_*.py yet."
+          fi
+
+      - name: Install test dependencies
+        if: steps.tests.outputs.present == 'true'
+        run: |
+          pip install --upgrade pip
+          # pyyaml is not optional: conftest loads the protocol spec through
+          # codegen, so the tests are checked against their real source.
+          pip install --upgrade pytest pyyaml
+          # Once the SDK is a package, install it too, so the tests exercise
+          # the same import path users get rather than only the path hack.
+          if [ -f sdk/pyproject.toml ]; then
+            pip install -e "sdk/[dev]" || pip install -e sdk/
+          fi
+
+      # Unit tests must pass with no board attached. The hardware-dependent
+      # suite under tests/ is deliberately not run here — it belongs on a
+      # self-hosted runner with real boards.
+      - name: pytest (no hardware)
+        if: steps.tests.outputs.present == 'true'
+        run: python -m pytest sdk/tests -q

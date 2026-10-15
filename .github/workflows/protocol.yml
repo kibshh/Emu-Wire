@@ -1,0 +1,102 @@
+name: protocol
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The wire format is generated from protocol/. If someone hand-edits
+  # messages.h or protocol.py, the firmware and the host SDK start disagreeing
+  # about the bytes on the wire — and nothing else in CI would notice, because
+  # both halves still build and both still pass their own tests. This job is
+  # the only thing standing between that edit and a silent interop bug.
+  drift:
+    name: generated files match the spec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install --upgrade pyyaml
+
+      # codegen validates the spec before emitting, so an invalid spec fails
+      # here too — with the specific rule that broke, not a parse error.
+      - name: Regenerate and compare
+        run: python protocol/codegen.py --check
+
+      # A diff is more useful than "files differ" when this does fail: it shows
+      # exactly what the hand-edit changed.
+      - name: Show what drifted
+        if: failure()
+        run: |
+          python protocol/codegen.py
+          echo "::error title=Generated files are stale::Someone edited a generated file by hand, or changed the spec without re-running codegen. Diff follows."
+          git --no-pager diff --stat
+          git --no-pager diff
+
+  # The generated code is committed but nothing else compiles or imports it
+  # yet — firmware/CMakeLists.txt does not exist, and neither does the SDK
+  # package. Without this job a codegen change could emit something that does
+  # not build, and CI would stay green until the firmware skeleton lands.
+  generated-code:
+    name: generated code compiles and imports
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"      # the floor the SDK promises
+
+      # Host gcc, not the Arm cross-compiler: the header is fixed-width types
+      # and packed structs, so its _Static_asserts on struct sizes hold
+      # identically on x86. That catches a packing or layout regression in
+      # seconds instead of downloading a 150 MB toolchain.
+      - name: Compile messages.h
+        run: |
+          cat > /tmp/tu.c <<'EOF'
+          #include "protocol/messages.h"
+          int main(void) { return (int)sizeof(emuwire_ping_response_t); }
+          EOF
+          gcc -std=c11 -Wall -Wextra -Werror -I firmware/src -c /tmp/tu.c -o /tmp/tu.o
+          echo "static assertions on struct sizes: $(grep -c _Static_assert firmware/src/protocol/messages.h) passed"
+
+      # Imports on 3.9 specifically. The generated module uses dataclasses and
+      # __future__ annotations; a codegen change that emits 3.10-only syntax
+      # would import fine on a modern interpreter and fail for users.
+      - name: Import protocol.py and check the CRC vector
+        run: |
+          python - <<'EOF'
+          import importlib.util, sys
+          spec = importlib.util.spec_from_file_location("p", "sdk/emuwire/protocol.py")
+          p = importlib.util.module_from_spec(spec)
+          sys.modules["p"] = p          # dataclasses resolves __module__ through this
+          spec.loader.exec_module(p)
+
+          # The pinned CRC variant. If this drifts, every frame disagrees with
+          # the firmware and nothing else would tell you.
+          assert p.crc16(b"123456789") == p.CRC_CHECK == 0x29B1, "CRC variant changed"
+
+          # Round-trip a frame through the generated encoder and decoder.
+          payload = p.PingResponse(status=0, uptime_ms=123456).pack()
+          frame = p.encode_frame(p.PingResponse.TYPE, 7, payload)
+          (msg_type, seq, body), used = p.decode_frame(frame)
+          assert (msg_type, seq, used) == (0x01, 7, len(frame)), (msg_type, seq, used)
+          assert p.PingResponse.unpack(body).uptime_ms == 123456
+
+          # Garbage, including a decoy magic byte, must not wedge the decoder.
+          noisy = b"\x00\xff\xa5\x01\xa5\x99\x99\xff\xff" + frame
+          got, _ = p.decode_frame(noisy)
+          assert got is not None and got[0] == 0x01, "decoder failed to resync"
+
+          print(f"imported on {sys.version.split()[0]}: CRC {p.crc16(b'123456789'):#06x}, "
+                f"{len(p.MESSAGE_NAMES)} messages, round-trip and resync OK")
+          EOF

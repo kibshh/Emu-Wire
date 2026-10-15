@@ -1,0 +1,104 @@
+# EmuWire wire protocol — SINGLE SOURCE OF TRUTH
+#
+# This is the entry point. The spec is split across the files listed under
+# `includes` below; protocol/codegen.py loads this file, merges them in order,
+# validates the result, and emits:
+#
+#   firmware/src/protocol/messages.h   (structs, offsets, enums)
+#   sdk/emuwire/protocol.py            (pack/unpack)
+#
+# Never hand-edit a generated file. Change the wire format here, re-run
+# codegen, and commit the regenerated output in the same commit. CI fails on
+# drift.
+
+protocol:
+  name: emuwire
+  # Bumped on any incompatible change. Reported by INFO so the SDK can refuse
+  # to talk to firmware it does not understand rather than misparse it.
+  version: 1
+  endianness: little        # every multi-byte field, without exception
+
+# ---------------------------------------------------------------------------
+# Includes
+# ---------------------------------------------------------------------------
+# Merged in this order. Top-level keys (`enums`, `bitmasks`, `structs`,
+# `messages`) are unioned; a duplicate key in two files is an error, not a
+# silent override — the loader must reject it rather than pick a winner.
+#
+# Order matters only for readability of diagnostics; every file is loaded
+# before validation runs, so forward references between files are fine.
+includes:
+  - frame.yaml              # frame layout, CRC parameters
+  - constants.yaml          # named sentinel values
+  - status.yaml             # status codes and their message templates
+  - enums.yaml              # wire vocabulary, bus-independent
+  - bitmasks.yaml           # flag fields
+  - structs.yaml            # composite payload members
+  - buses/i2c.yaml          # I2C: pins, addressing, speeds, supported faults
+  - buses/spi.yaml          # SPI: pins, modes, word widths, supported faults
+  - messages/system.yaml    # PING, INFO, RESET
+  - messages/bus.yaml       # BUS_CREATE, BUS_DESTROY, BUS_LIST
+  - messages/device.yaml    # DEV_ATTACH, DEV_DETACH, DEV_WRITE_REGS, DEV_READ_REGS
+  - messages/fault.yaml     # FAULT_SET, FAULT_CLEAR, FAULT_LIST
+  - messages/trace.yaml     # TRACE_START, TRACE_STOP
+  - messages/events.yaml    # EVT_DEV_ACCESS, EVT_FAULT_FIRED, EVT_TRACE_DATA, EVT_ERROR
+
+# ---------------------------------------------------------------------------
+# Enums built from other sections
+# ---------------------------------------------------------------------------
+# These are not written out by hand. Codegen takes each entry of the named
+# section and uses its key as the enum label and its `id` as the value, so
+# the enum cannot fall out of step with the thing it describes.
+derived_enums:
+  bus_protocol:
+    type: u8
+    from: buses          # key becomes the enum name, `id` becomes its value
+
+  # Every message id, as an enum. Built from the message catalogue so it can
+  # never disagree with it, and so a field carrying a message type — such as
+  # EVT_ERROR.context_type — can reference it instead of being a bare u8 with
+  # the meaning written in prose.
+  msg_type:
+    type: u8
+    from: messages
+
+# ---------------------------------------------------------------------------
+# Message type ID allocation
+# ---------------------------------------------------------------------------
+# Ranges are reserved per group so a new message never has to reuse a number.
+# IDs are permanent: never renumber one, only append within its range. The
+# same rule applies to enum values and bitmask bits.
+#
+#   0x01-0x0F  system      0x10-0x1F  bus       0x20-0x2F  device
+#   0x30-0x3F  fault       0x40-0x4F  trace     0x50-0x7F  reserved
+#   0x80-0xFF  asynchronous events
+#
+# Bit 7 of TYPE is the async marker, so a dispatcher can tell a command from
+# an event with one bit test and no lookup. The loader enforces that every
+# message in the `async` group has bit 7 set, and that no other message does.
+id_ranges:
+  system: [0x01, 0x0F]
+  bus:    [0x10, 0x1F]
+  device: [0x20, 0x2F]
+  fault:  [0x30, 0x3F]
+  trace:  [0x40, 0x4F]
+  async:  [0x80, 0xFF]
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+# The spec is checked before anything is emitted, and codegen refuses to write
+# a file if any check fails.
+#
+# The rules live in protocol/codegen.py, not here, because that is the only
+# place that can act on them. A list in this file could either be
+# authoritative — and then deleting a line would silently switch a check off,
+# which is not an invariant — or it could be a copy that goes stale. Neither
+# is worth having.
+#
+#   python protocol/codegen.py --rules    # what is enforced, and why
+#
+# The rules that constrain the wire format rather than the spec file — the
+# async bit, status first in every response, fixed-size repeated structs,
+# permanent ids — are explained in docs/protocol.md, which is where someone
+# writing a client in another language will look.

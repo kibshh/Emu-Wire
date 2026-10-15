@@ -1,0 +1,417 @@
+;
+; I2C slave — one handshake per byte.
+;
+; The state machine is the bit engine: it shifts bytes in and out, and holds
+; the bus still while the CPU decides what each one means. After every byte it
+; pulls SCL low, raises an IRQ and blocks until the CPU answers.
+;
+; That stretch is the load-bearing trick of the whole product. Without it the
+; ACK decision has to fit inside one SCL period — about 1 us at Fast-mode Plus
+; — which is not enough for an address lookup plus anything else. Stretching
+; turns a hard real-time deadline into a soft one, and real I2C slaves stretch
+; under load, so the bus sees nothing unusual.
+;
+; Because the CPU is asked once per byte, nearly all the behaviour lives
+; there: which addresses answer, whether a write is taken, which register a
+; read returns. The program only has to keep time.
+;
+; ---------------------------------------------------------------------------
+; Open drain
+; ---------------------------------------------------------------------------
+; A line is never driven high. The external pull-up does that, and a device
+; only ever pulls low. So the output registers are loaded with 0 once at init
+; and the program manipulates PIN DIRECTIONS:
+;
+;   pindir 1   pin becomes an output driving the stored 0  -> line LOW
+;   pindir 0   pin becomes an input                        -> line HIGH
+;
+; Driving a value instead of a direction is how you get two devices fighting
+; over a line, and it does not always show up until a second device is added.
+;
+; ---------------------------------------------------------------------------
+; Pin mapping — one pin per mechanism
+; ---------------------------------------------------------------------------
+; IN, SET and OUT share a base:
+;
+;   base + 0   SDA
+;   base + 1   SCL
+;
+;   SET / OUT   write SDA only (count = 1): the ACK, and the data bits.
+;   side-set    writes SCL only: "side 1" holds it low, "side 0" releases it.
+;   IN          samples SDA, masked to one pin so that MOV X, PINS reads SDA
+;               alone — that is what the reframe watch compares. The mask
+;               also applies to WAIT PIN, so SCL cannot be waited on that way.
+;   JMP PIN     is SCL: "is the clock still high?", and the pin every SCL
+;               WAIT uses (WAIT JMPPIN, which the mask does not touch).
+;
+; Splitting them this way means the stretch costs no instruction of its own:
+; side-set rides along with whatever instruction is already executing. It also
+; means SDA and SCL can never be written by the same instruction, so an ACK
+; can never accidentally release the clock.
+;
+; A .pio file cannot choose the pin counts, the side-set pin or the JMP pin.
+; They are set in C, in i2c_slave_program_init() below.
+;
+; ---------------------------------------------------------------------------
+; One byte, step by step
+; ---------------------------------------------------------------------------
+;   1. Idle watches for a START: SDA falling while SCL is high. A START sets
+;      IRQ 4 (relative to this state machine): "the next byte is an address".
+;   2. Eight bits go through one loop, in either direction. Receiving, the
+;      loop lets go of SDA and samples the master's bits. Sending, it drives
+;      the bits and samples them back — the echo, which the CPU checks.
+;   3. After the eighth clock falls, side-set pulls SCL low. The master is now
+;      held; it cannot start the ninth clock.
+;   4. IRQ 0 (relative) wakes the CPU. The byte is in the RX FIFO: an address
+;      if IRQ 4 is set, otherwise data the master wrote or the echo of a byte
+;      sent, which the CPU tells apart by the direction of the transaction.
+;   5. PULL blocks. The state machine does nothing at all until the CPU
+;      answers, however long that takes.
+;   6. The answer carries the ACK bit, where to continue, and any byte to send.
+;   7. SDA is sampled on the ninth clock. Low is an ACK — ours, or the
+;      master's after a byte we sent — and the program continues. High is a
+;      NACK, and it goes idle. That one sample is what ends a burst read.
+;
+; ---------------------------------------------------------------------------
+; What this version does NOT do
+; ---------------------------------------------------------------------------
+; * Nothing enforces what a write means. The CPU takes or NACKs each byte.
+; * A STOP and a repeated START look the same to the CPU: both just mean "the
+;   next byte is an address".
+; * A master that walks away mid-byte leaves SDA as it was until the next
+;   transaction reframes the program.
+;
+
+.program i2c_slave
+.pio_version 1                  ; RP2350: needed for WAIT JMPPIN
+.side_set 1 pindirs             ; side-set is SCL's direction: 1 = hold low
+
+; Side-set is not optional, so every instruction says what SCL does: side 1
+; only in the stretch, side 0 (released) everywhere else. Optional side-set
+; costs a bit of the delay field, and the delays below need all four: up to
+; 15 cycles instead of 7.
+
+; Pin offsets from the IN/SET/OUT base.
+.define PIN_SDA 0
+; There is deliberately no PIN_SCL. IN is masked to one pin, and the mask
+; applies to WAIT PIN too, so "wait 1 pin 1" would see SCL as 0 for ever.
+; Wait on SCL with WAIT JMPPIN instead: the JMP pin is SCL.
+
+; SET/OUT write SDA only, so the pattern is one bit wide.
+.define RELEASE_SDA 0
+
+; How long SDA is given to settle before SCL is released, in state-machine
+; cycles. The spec's data setup time.
+.define PUBLIC ACK_SETUP 15
+
+; How long SDA is held after SCL falls before it changes, in state-machine
+; cycles: after our ACK, and between the bits of a byte we send. Changing SDA
+; the instant SCL looks low risks another device still seeing SCL high on a
+; slow falling edge, and reading the change as a START or STOP.
+.define PUBLIC DATA_HOLD 15
+
+; Both are placeholders. How many cycles they need depends on the cycle
+; length, which depends on the bus speed, so i2c_slave_timing() below works
+; them out and i2c_slave_patch() writes them into these instructions before
+; the program is loaded. The labels ack_setup, ack_hold and bit_hold mark
+; where they go.
+
+; IRQ flag 4 (relative to this state machine, so 4..7), set at every START:
+; the next byte the CPU sees is an address. The CPU clears it at every
+; handshake. Flags 4-7 cannot reach the CPU as an interrupt, which is exactly
+; right: this is a label on the byte, read by the handler flag 0 already woke.
+.define MARK_ADDRESS 4
+
+; --- the start of a transaction ----------------------------------------
+; Entered from three places: a START from idle, a repeated START spotted
+; mid-transaction, and a STOP — after a STOP the next falling edge of SCL can
+; only belong to the next transaction's first bit, so waiting for it is the
+; same as waiting for the START.
+got_start:
+    irq set MARK_ADDRESS rel side 0 ; the next byte is an address
+    mov osr, null            side 0 ; nothing to drive while it comes in
+    set x, 7                 side 0
+    wait 0 jmppin            side 0 ; the START's own falling edge of SCL
+
+; --- one byte, in either direction -------------------------------------
+; Each bit: put it on SDA, wait for SCL to rise, sample SDA, wait for SCL to
+; fall. Data changes only while SCL is low, as the spec requires.
+;
+;   receiving      the OSR holds zeros, so OUT lets go of SDA every bit and
+;                  IN takes the master's bit
+;   transmitting   OUT drives the byte the CPU sent, inverted because OUT
+;                  writes PINDIRS where 1 means "pull low"; IN reads back what
+;                  is actually on the bus, and the CPU compares the two
+;
+; One loop serves both, which is what made room for burst reads.
+public byte_loop:
+    out pindirs, 1           side 0
+    wait 1 jmppin            side 0
+    in pins, 1               side 0 ; autopush delivers the byte after 8 bits
+    wait 0 jmppin            side 0
+public bit_hold:
+    jmp x-- byte_loop        side 0 [DATA_HOLD] ; hold SDA a while before the next bit
+
+; --- stretch, ask the CPU, then the ninth clock ------------------------
+; The CPU answers in one word:
+;
+;   bit 31      1 drives SDA low (our ACK); 0 lets go of it — our NACK, or
+;               room for the master to answer a byte we sent
+;   bits 30:26  where to continue: rx_path, or byte_loop to send a byte
+;   bits 25:18  the byte to send, inverted; zero otherwise
+;
+; The loop above ends with SCL already low, so the stretch can start at once:
+; pulling SCL low while the master still held it high would cut its high
+; period short, and that cannot happen here.
+handshake:
+    irq nowait 0 rel         side 1 ; hold SCL low; the byte is in the RX FIFO
+    pull block               side 1 ; the answer — blocks for as long as it takes
+public ack_setup:
+    out pindirs, 1           side 1 [ACK_SETUP] ; our ACK, or let go; then let SDA settle
+    wait 1 jmppin            side 0 ; release SCL: the ninth clock
+    mov x, pins              side 0 ; SDA on the ninth clock: 0 ACK, 1 NACK
+public ack_hold:
+    wait 0 jmppin            side 0 [DATA_HOLD]
+    set pindirs, RELEASE_SDA side 0 ; release SDA once the clock has fallen
+    jmp !x, dispatch         side 0 ; ACK: carry on where the CPU said
+                                    ; NACK: fall through to idle
+
+; --- idle ---------------------------------------------------------------
+; Reached by a NACK — ours, or the master's ending a read — with both lines
+; already released by the handshake.
+.wrap_target
+public idle:
+    wait 1 pin PIN_SDA       side 0
+    wait 0 pin PIN_SDA       side 0 ; SDA falls...
+    jmp pin got_start        side 0 ; ...and SCL is still high: START
+.wrap
+
+dispatch:
+    set x, 7                 side 0 ; a whole byte, unless rx_path says otherwise
+    out pc, 5                side 0 ; go where the CPU said
+
+; --- receiving, master writing -----------------------------------------
+; The first bit of a byte is the only place a START or STOP can appear, so it
+; is the only bit that needs watching. Sample SDA when SCL rises, then watch
+; it until SCL falls:
+;
+;   SDA steady           an ordinary data bit
+;   SDA fell   while high  repeated START — an address follows
+;   SDA rose   while high  STOP — the transaction is over
+;
+; Both of those mean the next byte is an address, and got_start handles
+; either. Nothing is shifted into the ISR until the bit is known to be real,
+; so a reframe never leaves half a byte behind.
+public rx_path:
+    mov osr, null            side 0 ; let go of SDA for every bit, whatever the answer held
+    wait 1 jmppin            side 0
+    mov y, pins              side 0 ; SDA at the rising edge (IN count masks it to one bit)
+rx_watch:
+    mov x, pins              side 0
+    jmp x!=y, rx_moved       side 0 ; SDA moved: but was SCL still high?
+    jmp pin rx_watch         side 0 ; SCL still high: keep watching
+rx_moved:
+    jmp pin got_start        side 0 ; SDA moved while SCL was high: START or STOP
+    in y, 1                  side 0 ; SCL had fallen: a real bit
+    set x, 6                 side 0 ; seven more through the shared loop
+    jmp byte_loop            side 0
+
+% c-sdk {
+#include "hardware/clocks.h"
+#include "hardware/gpio.h"
+
+/* The program's timing for one bus speed: the state machine's clock divider,
+ * and the delays i2c_slave_patch() writes into the program.
+ *
+ * The divider sets how finely the program resolves an edge, not the bus
+ * speed — the master owns the clock. Idle sees SDA fall, then reads SCL up to
+ * 2 cycles later; a data bit whose SCL rises inside that window looks like a
+ * START. So 2 cycles must stay under the data setup time the fastest master
+ * may use (250 ns Standard-mode, 100 ns Fast-mode, 50 ns Fast-mode Plus).
+ * This picks the largest divider that keeps them under 80% of it.
+ *
+ * The delays then make up the time, in however many cycles that takes:
+ *
+ *   ack_setup   SDA settles before we release SCL: 250 ns, Standard-mode's
+ *               setup, because a master may run slower than the bus allows
+ *   data_hold   SDA held after SCL falls: 300 ns, the hold the spec asks a
+ *               device to give, to bridge a slow falling edge of SCL
+ *
+ * Each counts its own instruction, so the delay is one cycle less. Both must
+ * fit the delay field (15), and the hold must leave the master its setup time
+ * inside its shortest SCL low time, or the next bit would be late.
+ *
+ * At 150 MHz: 20 ns cycles up to 1 MHz (setup 260 ns, hold 300 ns), 40 ns up
+ * to 400 kHz (280, 320), 100 ns up to 100 kHz (300, 300).
+ *
+ * Above 1 MHz is High-speed mode, which signals differently: refused, as is a
+ * system clock that cannot meet the timing. An integer divider, so every
+ * cycle has the same length: a fractional one makes some cycles a system
+ * clock longer than others. */
+typedef struct {
+    uint clkdiv;    /* system clocks per state-machine cycle */
+    uint ack_setup; /* delay cycles at ack_setup */
+    uint data_hold; /* delay cycles at ack_hold and bit_hold */
+} i2c_slave_timing_t;
+
+#define I2C_SLAVE_MAX_DELAY 15u /* 4 delay bits: side-set is not optional */
+
+/* Whole cycles to cover ns, rounded up. */
+static inline uint64_t i2c_slave_cycles(uint64_t ns, uint64_t clk_hz, uint64_t div) {
+    const uint64_t ns_per_cycle_x_clk = div * 1000000000ull;
+    return (ns * clk_hz + ns_per_cycle_x_clk - 1u) / ns_per_cycle_x_clk;
+}
+
+static inline bool i2c_slave_timing(uint32_t clk_hz, uint bus_hz, i2c_slave_timing_t *t) {
+    if (bus_hz == 0u || bus_hz > 1000000u) {
+        return false;
+    }
+    // The fastest master's data setup time and shortest SCL low time, in ns.
+    const uint64_t setup_ns = bus_hz <= 100000u ? 250u : bus_hz <= 400000u ? 100u : 50u;
+    const uint64_t low_ns = bus_hz <= 100000u ? 4700u : bus_hz <= 400000u ? 1300u : 500u;
+
+    // 2 cycles <= 0.8 * setup, so cycles of at most 0.4 * setup.
+    uint64_t div = setup_ns * clk_hz * 4u / 10000000000ull;
+    if (div > 65535u) {
+        div = 65535u;
+    }
+    if (div == 0u) {
+        return false;
+    }
+
+    const uint64_t setup_cycles = i2c_slave_cycles(250u, clk_hz, div);
+    const uint64_t hold_cycles = i2c_slave_cycles(300u, clk_hz, div);
+    if (setup_cycles - 1u > I2C_SLAVE_MAX_DELAY || hold_cycles - 1u > I2C_SLAVE_MAX_DELAY) {
+        return false;
+    }
+    // After SCL falls: the hold, then the longest way to the next bit — after
+    // the ninth clock, through dispatch into the next byte, 6 instructions to
+    // put a bit out and one more to be waiting for SCL to rise — and then the
+    // master's setup before it may raise SCL again. There is no setup delay
+    // for those bits: the master raises SCL, so their setup is whatever this
+    // leaves of its low time.
+    if ((hold_cycles + 7u) * div * 1000000000ull + setup_ns * clk_hz > low_ns * clk_hz) {
+        return false;
+    }
+
+    t->clkdiv = (uint)div;
+    t->ack_setup = (uint)(setup_cycles - 1u);
+    t->data_hold = (uint)(hold_cycles - 1u);
+    return true;
+}
+
+/* Copy the program into `insns` (i2c_slave_program.length words) with the
+ * delays from `t` written in, and describe the copy in `prog`, ready for
+ * pio_add_program(). False if an instruction at a label does not carry the
+ * placeholder delay: the program and this function disagree, which is a bug.
+ *
+ * With one side-set bit and no `opt`, an instruction's bits 12:8 are the
+ * side-set value (bit 12) and the delay (bits 11:8). */
+static inline bool i2c_slave_patch(const i2c_slave_timing_t *t, uint16_t *insns,
+                                   struct pio_program *prog) {
+    for (uint i = 0; i < i2c_slave_program.length; i++) {
+        insns[i] = i2c_slave_program_instructions[i];
+    }
+    const uint at[3] = {i2c_slave_offset_ack_setup, i2c_slave_offset_ack_hold,
+                        i2c_slave_offset_bit_hold};
+    const uint delay[3] = {t->ack_setup, t->data_hold, t->data_hold};
+    for (uint i = 0; i < 3u; i++) {
+        if (((insns[at[i]] >> 8) & 0xfu) != I2C_SLAVE_MAX_DELAY ||
+            delay[i] > I2C_SLAVE_MAX_DELAY) {
+            return false;
+        }
+        insns[at[i]] = (uint16_t)((insns[at[i]] & ~0x0f00u) | (delay[i] << 8));
+    }
+    *prog = i2c_slave_program;
+    prog->instructions = insns;
+    return true;
+}
+
+/* Configure a state machine as an I2C slave on two consecutive pins.
+ *
+ *   pin_sda    the lower of the pair; SCL must be pin_sda + 1
+ *   clkdiv     from i2c_slave_timing()
+ *
+ * The state machine is left STOPPED. Start it only once something is ready to
+ * answer the handshake IRQ — a state machine that stretches with nobody
+ * listening holds the bus down for good.
+ */
+static inline void i2c_slave_program_init(PIO pio, uint sm, uint offset, uint pin_sda,
+                                          uint clkdiv) {
+    const uint pin_scl = pin_sda + 1;
+
+    pio_sm_config c = i2c_slave_program_get_default_config(offset);
+
+    // SET and OUT reach SDA only. SCL is side-set's, and nothing else writes
+    // it, so releasing the clock is always deliberate.
+    sm_config_set_in_pins(&c, pin_sda);
+    sm_config_set_set_pins(&c, pin_sda, 1);
+    sm_config_set_out_pins(&c, pin_sda, 1);
+    sm_config_set_sideset_pins(&c, pin_scl);
+    sm_config_set_jmp_pin(&c, pin_scl);
+
+    // One input pin, so MOV X, PINS reads SDA and nothing else. Without this
+    // the reframe watch would compare every GPIO on the chip, and a PWM
+    // output elsewhere on the board would look like a STOP.
+    //
+    // The mask also applies to WAIT PIN, which is why the program waits on
+    // SCL through the JMP pin. Found on the bench: with WAIT PIN on SCL, the
+    // state machine saw a START and then waited for ever on the first clock.
+    sm_config_set_in_pin_count(&c, 1);
+
+    // IN: MSB first, autopush at 8, so a byte arrives on its own — including
+    // the echo of every byte sent.
+    // OUT: no autopull. The answer word is pulled once and then read in
+    // pieces — ACK bit, continuation, byte — and autopull would refill it
+    // part-way through.
+    sm_config_set_in_shift(&c, false, true, 8);    // shift left, autopush at 8
+    sm_config_set_out_shift(&c, false, false, 32); // shift left, no autopull
+
+    sm_config_set_clkdiv_int_frac8(&c, clkdiv, 0);
+
+    pio_gpio_init(pio, pin_sda);
+    pio_gpio_init(pio, pin_scl);
+
+    // THE open-drain setup: the output registers hold 0 permanently, so
+    // making a pin an output can only ever pull it low. Start with both as
+    // inputs so the bus is released until the program drives it.
+    pio_sm_set_pins_with_mask(pio, sm, 0, (1u << pin_sda) | (1u << pin_scl));
+    pio_sm_set_pindirs_with_mask(pio, sm, 0, (1u << pin_sda) | (1u << pin_scl));
+
+    // Internal pull-ups are far too weak for I2C edges. Leaving them off
+    // means a missing external resistor fails loudly instead of limping.
+    gpio_disable_pulls(pin_sda);
+    gpio_disable_pulls(pin_scl);
+
+    // Start at idle, not at the first instruction. The program is laid out
+    // with the byte loop first, and entering there would mean starting in the
+    // middle of a transaction that never began.
+    pio_sm_init(pio, sm, offset + i2c_slave_offset_idle, &c);
+}
+
+/* IRQ flag 4 + sm, set at every START and read by the handler: it says the
+ * byte waiting in the RX FIFO is an address. Anything else is data the master
+ * wrote, or the echo of a byte sent. Flags 4-7 cannot raise a system
+ * interrupt, which is what makes them safe to use as a label on a byte. */
+#define I2C_SLAVE_MARK_ADDRESS 4u
+
+/* The answer to one handshake, in one word.
+ *
+ *   bit 31      1 drives SDA low on the ninth clock: our ACK. 0 lets go of it:
+ *               our NACK, or room for the master to ACK a byte we sent.
+ *   bits 30:26  where to continue: rx_path, or byte_loop to send a byte, each
+ *               plus the offset the program was loaded at. Ignored on a NACK,
+ *               which always goes idle.
+ *   bits 25:18  the byte to send, inverted, because OUT writes PINDIRS where
+ *               1 means "pull low". Ignored otherwise: rx_path clears the
+ *               OSR before receiving, so a stray byte here cannot drive the
+ *               master's data bits.
+ */
+static inline uint32_t i2c_slave_answer(bool ack, uint continue_at) {
+    return ((uint32_t)(ack ? 1u : 0u) << 31) | ((uint32_t)(continue_at & 0x1fu) << 26);
+}
+
+static inline uint32_t i2c_slave_answer_send(bool ack, uint continue_at, uint8_t byte) {
+    return i2c_slave_answer(ack, continue_at) | ((uint32_t)(uint8_t)~byte << 18);
+}
+%}

@@ -1,0 +1,45 @@
+# Frame layout and CRC — the transport envelope
+#
+# Part of the EmuWire protocol spec. Entry point: protocol/protocol.yaml
+
+frame:
+  magic: 0xA5
+  header_bytes: 5           # magic + type + seq + len
+  trailer_bytes: 2          # crc16
+  overhead_bytes: 7
+
+  fields:
+    - {name: magic,   type: u8,  value: 0xA5, description: "Frame start. Resync scans for this byte."}
+    - {name: type,    type: u8,  description: "Message type. Bit 7 set means an asynchronous event."}
+    - {name: seq,     type: u8,  description: "Echoed by the device so the host can match a reply. 0 for async events."}
+    - {name: len,     type: u16, description: "Payload length in bytes, excluding header and CRC."}
+
+  crc_covers: [type, seq, len, payload]   # NOT magic, NOT the crc itself
+
+  # The decoder must validate LEN against this BEFORE reading a payload.
+  # A length field is attacker- and noise-controlled; never trust it.
+  max_payload_bytes: 8192
+
+  # SEQ 0 is reserved for device-originated events, so a response can never be
+  # confused with an event. The host allocates 1..255 and wraps.
+  seq:
+    async_value: 0
+    host_range: [1, 255]
+
+# ---------------------------------------------------------------------------
+# CRC
+# ---------------------------------------------------------------------------
+# "CRC16-CCITT" names several mutually incompatible algorithms. This pins the
+# exact one. C and Python must agree byte for byte; the `check` value is the
+# published result for the ASCII string "123456789" and is a required test
+# vector on both sides.
+crc:
+  name: CRC-16/IBM-3740          # also published as CRC-16/CCITT-FALSE
+  width: 16
+  polynomial: 0x1021
+  init: 0xFFFF
+  reflect_in: false
+  reflect_out: false
+  xor_out: 0x0000
+  check: 0x29B1                  # CRC of "123456789"
+  implementation: table_driven   # 256-entry table, MSB-first

@@ -1,0 +1,57 @@
+# Fault messages — faults attach to a device, not a bus
+#
+# Part of the EmuWire protocol spec. Entry point: protocol/protocol.yaml
+# Merged by protocol/codegen.py — see protocol.yaml for ID allocation rules.
+
+messages:
+
+  FAULT_SET:
+    id: 0x30
+    group: fault
+    direction: host_to_device
+    description: >
+      Arm a fault on a device. Faults attach to a device, not a bus. See the
+      fault_type and fault_trigger enums for what param_a, param_b, trigger_n
+      and trigger_reg mean for each combination.
+    request:
+      - {name: bus_id,          type: u8}
+      - {name: dev_id,          type: u8}
+      - {name: fault_type,      type: u8,  enum: fault_type}
+      - {name: trigger,         type: u8,  enum: fault_trigger}
+      - {name: trigger_reg,     type: u16, description: "WHEN, scope: which register the access-counting triggers watch. REG_ANY counts the whole device. Ignored by AFTER_MS and RANDOM_MS, which do not count accesses."}
+      - {name: target_reg,      type: u16, description: "WHAT: the register a register-modifying fault acts on. Separate from trigger_reg so 'on the 3rd read of 0xD0, corrupt 0xF7' is expressible."}
+      - {name: repeat_count,    type: u16, description: "HOW MANY times it fires before auto-clearing. FAULT_REPEAT_UNLIMITED to fire until explicitly cleared. This is the only count — a fault type never carries its own."}
+      - {name: probability_pct, type: u8,  description: "1-100, for the RANDOM_ACCESS trigger. Ignored otherwise."}
+      - {name: access_filter,   type: u8,  enum: access_filter, description: "WHEN, filter: read, write, or either. Ignored by AFTER_MS and RANDOM_MS."}
+      - {name: trigger_n,       type: u32}
+      - {name: param_a,         type: u32, description: "Fault-specific. See the params note on each fault_type value."}
+      - {name: param_b,         type: u32, description: "Fault-specific. Only CLOCK_SKEW uses it."}
+    response:
+      - {name: status,   type: u8, enum: status}
+      - {name: fault_id, type: u8}
+
+  FAULT_CLEAR:
+    id: 0x31
+    group: fault
+    direction: host_to_device
+    description: "Disarm one fault, or every fault on a device."
+    request:
+      - {name: bus_id,   type: u8}
+      - {name: dev_id,   type: u8}
+      - {name: fault_id, type: u8, description: "FAULT_ID_ALL clears every fault on the device."}
+    response:
+      - {name: status, type: u8, enum: status}
+
+  FAULT_LIST:
+    id: 0x32
+    group: fault
+    direction: host_to_device
+    description: "Enumerate armed faults, with how many firings remain and how many have happened."
+    request:
+      - {name: bus_id, type: u8}
+      - {name: dev_id, type: u8, description: "DEV_ID_ALL lists faults on every device on the bus."}
+    response:
+      - {name: status, type: u8, enum: status}
+      - {name: count,  type: u8}
+      - {name: faults, type: struct, struct: fault_info, count_field: count}
+

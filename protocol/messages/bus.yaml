@@ -1,0 +1,49 @@
+# Bus messages — a bus is a first-class object
+#
+# Part of the EmuWire protocol spec. Entry point: protocol/protocol.yaml
+# Merged by protocol/codegen.py — see protocol.yaml for ID allocation rules.
+
+messages:
+
+  BUS_CREATE:
+    id: 0x10
+    group: bus
+    direction: host_to_device
+    description: >
+      Allocate a bus and bind it to pins and a PIO state machine. A bus is a
+      first-class object: devices attach to it, and a dev_id is meaningless
+      without its bus_id. This is the modelling decision PIO makes possible
+      and it must not be flattened back into one-device-per-peripheral.
+    request:
+      - {name: protocol,   type: u8,  enum: bus_protocol}
+      - {name: clk_pin,    type: u8,  description: "I2C: SCL. SPI: SCK."}
+      - {name: dat0_pin,   type: u8,  description: "I2C: SDA. SPI: MOSI."}
+      - {name: dat1_pin,   type: u8,  description: "SPI: MISO. PIN_UNUSED when the protocol does not use it."}
+      - {name: cs_pin,     type: u8,  description: "SPI: CS. PIN_UNUSED when the protocol does not use it."}
+      - {name: _pad,       type: u8}
+      - {name: nominal_clock_hz, type: u32, description: "Expected DUT clock. Used to pick timing and to detect out-of-spec operation."}
+    response:
+      - {name: status, type: u8, enum: status}
+      - {name: bus_id, type: u8}
+
+  BUS_DESTROY:
+    id: 0x11
+    group: bus
+    direction: host_to_device
+    description: "Detach every device, release the state machine and free the pins."
+    request:
+      - {name: bus_id, type: u8}
+    response:
+      - {name: status, type: u8, enum: status}
+
+  BUS_LIST:
+    id: 0x12
+    group: bus
+    direction: host_to_device
+    description: "Enumerate live buses, including which PIO resources each holds."
+    request: []
+    response:
+      - {name: status, type: u8, enum: status}
+      - {name: count,  type: u8}
+      - {name: buses,  type: struct, struct: bus_info, count_field: count}
+

@@ -1,0 +1,49 @@
+# SPI — pin roles, modes, supported faults
+#
+# Part of the EmuWire protocol spec. Entry point: protocol/protocol.yaml
+
+buses:
+
+  SPI:
+    id: 0x02
+    description: >
+      Four-wire push-pull bus, CS-gated. The emulated device only responds
+      while its chip select is asserted, so several devices share SCK/MOSI/MISO
+      and are distinguished by CS rather than by an address.
+
+    pins:
+      clk_pin:  SCK
+      dat0_pin: MOSI
+      dat1_pin: MISO
+      cs_pin:   CS
+
+    # SPI puts no address on the wire — a device is selected by asserting its
+    # chip select. DEV_ATTACH.address therefore carries the CS index rather
+    # than a bus address.
+    address_modes: [ADDR_CHIP_SELECT]
+
+    # CPOL is the idle clock level; CPHA selects which edge samples data.
+    modes:
+      MODE0: {cpol: 0, cpha: 0}
+      MODE1: {cpol: 0, cpha: 1}
+      MODE2: {cpol: 1, cpha: 0}
+      MODE3: {cpol: 1, cpha: 1}
+
+    word_widths: [8, 16]
+
+    # SPI is master-clocked and has no acknowledge phase, so a whole class of
+    # I2C faults is not merely unimplemented here — it is meaningless. Saying
+    # so as data means FAULT_SET rejects them with ERR_UNSUPPORTED_FAULT
+    # instead of arming a fault that can never fire.
+    #
+    # Excluded, and why:
+    #   NACK_ON_READ / NACK_ON_WRITE / ACK_GLITCH — SPI has no ACK bit
+    #   BUS_HANG / CLOCK_STRETCH / CLOCK_SKEW     — the slave cannot hold or
+    #                                               stretch a master's clock
+    supported_faults:
+      - CORRUPT_REGISTER
+      - OUT_OF_RANGE
+      - STUCK_VALUE
+      - SETUP_VIOLATION
+      - HOLD_VIOLATION
+      - PARTIAL_BYTE
